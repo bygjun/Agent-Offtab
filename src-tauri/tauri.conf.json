@@ -1,0 +1,41 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Offtab",
+  "version": "0.5.0",
+  "identifier": "local.sessiondesk.app",
+  "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run build",
+    "frontendDist": "../dist-tauri"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Offtab",
+        "width": 420,
+        "height": 280,
+        "minWidth": 290,
+        "minHeight": 162,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "backgroundThrottling": "disabled",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 15, "y": 14 },
+        "backgroundColor": "#171819",
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg"],
+    "category": "DeveloperTool",
+    "icon": ["../build/icon.icns", "../build/icon.png"],
+    "macOS": { "signingIdentity": "-" }
+  }
+}

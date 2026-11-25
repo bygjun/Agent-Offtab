@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Codex와 Claude Code의 작업 상태와 최근 대화를 Mac 화면 옆 작은 창에서 확인하세요.">
+  <meta name="theme-color" content="#171816">
+  <title>Offtab · 화면 옆에 두는 에이전트 세션</title>
+  <link rel="icon" href="assets/offtab.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top wrap">
+    <a class="wordmark" href="./"><img src="assets/offtab.png" alt="" width="34" height="34">Offtab</a>
+    <nav aria-label="페이지 메뉴">
+      <a href="#features">기능</a>
+      <a href="#install">설치</a>
+      <a href="https://github.com/bygjun/Agent-Offtab">GitHub</a>
+    </nav>
+  </header>
+  <main>
+    <section class="hero wrap" aria-labelledby="heading">
+      <div class="intro">
+        <p class="eyebrow">Codex · Claude Code</p>
+        <h1 id="heading">에이전트 세션을<br>화면 옆에.</h1>
+        <p class="lede">누가 작업 중인지, 어디에 답변이 필요한지, 어떤 결과가 도착했는지 한눈에 확인하세요.</p>
+        <div class="buttons">
+          <a class="download" href="#install">Mac 프리뷰 받기</a>
+          <a class="secondary" href="https://github.com/bygjun/Agent-Offtab">GitHub에서 보기</a>
+        </div>
+        <p class="requirements">Apple Silicon Mac · macOS 14 이상 권장</p>
+      </div>
+      <div class="stage" aria-label="작업 창 위에 떠 있는 Offtab 예시">
+        <div class="work-window" aria-hidden="true">
+          <div class="work-bar"><span></span><span></span><span></span></div>
+          <div class="work-lines"><i></i><i></i><i></i><i></i><i></i></div>
+        </div>
+        <div class="panel">
+          <div class="panel-bar"><img src="assets/offtab.png" alt="" width="24" height="24"><span>진행 중 세션</span><span class="pin" aria-label="항상 위에 고정">고정</span></div>
+          <ul class="sessions">
+            <li>
+              <span class="provider claude" aria-label="Claude Code">✳</span>
+              <div><h2>앱 설정 흐름 검토</h2><p>두 가지 화면 구성을 준비했어요. 어떤 순서로 보여줄까요?</p></div>
+              <span class="state waiting">입력 대기</span>
+            </li>
+            <li>
+              <span class="provider codex" aria-label="Codex">›_</span>
+              <div><h2>검색 결과 속도 개선</h2><p>인덱스를 변경하고 응답 시간을 비교하고 있습니다.</p></div>
+              <span class="state running">작업 중</span>
+            </li>
+            <li>
+              <span class="provider codex" aria-label="Codex">›_</span>
+              <div><h2>리포트 다운로드 추가</h2><p>CSV 내보내기와 빈 결과 처리를 확인했습니다.</p></div>
+              <span class="state done">완료</span>
+            </li>
+          </ul>
+        </div>
+        <p class="example">예시 세션</p>
+      </div>
+    </section>
+
+    <section id="features" class="features wrap" aria-labelledby="feature-title">
+      <h2 id="feature-title">작업 흐름을 놓치지 않게</h2>
+      <div class="feature-grid">
+        <article><h3>필요한 상태가 먼저</h3><p>입력·승인 대기는 목록 맨 위에 표시합니다. 백그라운드 작업이 끝나면 결과를 열어볼 때까지 확인할 수 있습니다.</p></article>
+        <article><h3>클릭해서 원본으로</h3><p>미리보기를 읽고 클릭하면 해당 Codex 또는 Claude Code 세션으로 돌아갑니다.</p></article>
+        <article><h3>작업에 맞게 정리</h3><p>창의 크기와 위치를 조절하고, 필요 없는 세션은 우클릭으로 목록에서 제외할 수 있습니다.</p></article>
+      </div>
+    </section>
+
+    <section id="install" class="install wrap" aria-labelledby="install-title">
+      <div class="install-copy">
+        <h2 id="install-title">Mac에서 시작하기</h2>
+        <ol>
+          <li>Apple Silicon용 DMG를 다운로드하세요.</li>
+          <li>Offtab을 응용 프로그램 폴더로 드래그하세요.</li>
+          <li>Offtab을 열고 Codex 또는 Claude Code에서 작업하세요.</li>
+        </ol>
+      </div>
+      <div class="release">
+        <p class="eyebrow">v0.5.0 프리뷰</p>
+        <a class="download" href="https://github.com/bygjun/Agent-Offtab/releases/download/v0.5.0/Offtab-0.5.0-arm64.dmg">Apple Silicon용 DMG</a>
+        <p>Apple 공증 전 테스트 빌드입니다. macOS가 실행을 제한할 수 있습니다.</p>
+        <a href="https://github.com/bygjun/Agent-Offtab/releases/tag/v0.5.0">릴리스 정보</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot wrap">
+    <p>대화 기록은 Mac에서 읽으며 외부 서버로 보내지 않습니다.</p>
+    <a href="https://github.com/bygjun/Agent-Offtab/issues">문제 제보</a>
+  </footer>
+</body>
+</html>

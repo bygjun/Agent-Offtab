@@ -1,0 +1,25 @@
+[package]
+name = "session-desk"
+version = "0.5.0"
+description = "A local inbox for Codex and Claude Code sessions"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+pulldown-cmark = { version = "0.13.6", default-features = false }
+regex = "1"
+rusqlite = "0.40"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
+tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+strip = true
