@@ -1,9 +1,9 @@
-import { LoaderCircle } from 'lucide-react';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { ChevronRight, LoaderCircle } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ProviderLogo } from './provider-logo';
 import { isWorking, sessionKey, type Entry, type TrackedSessions } from './tracked-state';
 import { TypedPreview } from './typed-preview';
-import { sessionTree, type SessionTree } from './session-tree';
+import { hasPendingSessions, sessionTree, type SessionTree } from './session-tree';
 import type { Session } from './types';
 
 function priority(entry: Entry) {
@@ -92,6 +92,31 @@ export function SessionRowActions({ children, descendants, className, onRead, on
   );
 }
 
+export function SessionChildren<Row extends { session: Session }>({ nodes, render, compact, searchQuery }: {
+  nodes: SessionTree<Row>[];
+  render(node: SessionTree<Row>): ReactNode;
+  compact?: boolean;
+  searchQuery?: string;
+}) {
+  const disclosure = useRef<HTMLDetailsElement>(null);
+  const collapsible = nodes.length > 1;
+  const pending = collapsible && hasPendingSessions(nodes);
+  useLayoutEffect(() => {
+    // Keep manual toggles during polling and leave finished work open for review.
+    if (disclosure.current && (pending || searchQuery)) disclosure.current.open = true;
+  }, [collapsible, pending, searchQuery]);
+
+  const list = <ul className={compact ? 'session-children compact-children' : 'session-children'} aria-label="하위 세션">
+    {nodes.map(render)}
+  </ul>;
+  return collapsible ? (
+    <details className="session-group" ref={disclosure}>
+      <summary><ChevronRight aria-hidden="true" />하위 세션 {nodes.length}개</summary>
+      {list}
+    </details>
+  ) : list;
+}
+
 export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening, notice, loading }: {
   sessions: TrackedSessions;
   parents: Session[];
@@ -115,9 +140,8 @@ export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening
     const canRead = !context && !session.waiting && !isWorking(session) && session.active === false && readAt === undefined;
     return (
       <SessionRowActions key={key} onRead={canRead ? () => onRead(session) : undefined} onHide={() => onHide(session)}
-        descendants={children.length > 0 && <ul className="session-children compact-children" aria-label="하위 세션">
-          {children.map(child => renderRow(child, session))}
-        </ul>}>
+        descendants={children.length > 0 && <SessionChildren nodes={children} compact
+          render={child => renderRow(child, session)} />}>
         <button type="button" className={parent ? 'compact-row compact-child-row' : 'compact-row'} data-read={readAt !== undefined}
           title="원본 세션 열기" disabled={opening === key}
           onClick={() => onOpen(session)}>

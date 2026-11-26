@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, ChevronDown, Command, Layers2, Maximize2, Minimize2, Pin, PinOff, RefreshCw, Search, Settings, ShieldCheck, X } from 'lucide-react';
 import { day, type DeskApi, type ListScope, type Provider, type Session, type Snapshot, type Source, type WindowMode } from './types';
-import { CompactList, SessionRowActions, SessionStatus, SessionTitle } from './compact-list';
+import { CompactList, SessionChildren, SessionRowActions, SessionStatus, SessionTitle } from './compact-list';
 import { sessionTree, type SessionTree } from './session-tree';
 import { hideSession, isWorking, markRead, restoreTracked, saveTracked, sessionKey, trackSessions, type TrackedSessions } from './tracked-state';
 import { DeskSettings } from './desk-settings';
@@ -35,18 +35,17 @@ function ProviderIcon({ provider }: { provider: Filter }) {
   return <ProviderLogo provider={provider} />;
 }
 
-function SessionRow({ tree, now, onOpen, onHide, opening }: {
+function SessionRow({ tree, now, onOpen, onHide, opening, searchQuery }: {
   tree: SessionTree<{ session: Session }>; now: number; onOpen: (item: Session) => void;
-  onHide: (item: Session) => void; opening?: string;
+  onHide: (item: Session) => void; opening?: string; searchQuery: string;
 }) {
   const { row: { session: item }, context, children } = tree;
   const folder = item.cwd.split('/').filter(Boolean).at(-1);
   return (
     <SessionRowActions className="session-row" onHide={() => onHide(item)}
-      descendants={children.length > 0 && <ul className="session-children" aria-label="하위 세션">
-        {children.map(child => <SessionRow key={sessionKey(child.row.session)} tree={child} now={now}
-          opening={opening} onOpen={onOpen} onHide={onHide} />)}
-      </ul>}>
+      descendants={children.length > 0 && <SessionChildren nodes={children} searchQuery={searchQuery}
+        render={child => <SessionRow key={sessionKey(child.row.session)} tree={child} now={now}
+          opening={opening} onOpen={onOpen} onHide={onHide} searchQuery={searchQuery} />} />}>
       <button type="button" className="session-open" title="원본 세션 열기"
         onClick={() => onOpen(item)} disabled={opening === sessionKey(item)}>
       <span className="session-identity">
@@ -391,7 +390,7 @@ export function App({ desk, clock = Date.now, persist = false }: { desk: DeskApi
               <>
                 <ul className="session-list" aria-label="세션 목록">
                   {tree.map(node => <SessionRow key={sessionKey(node.row.session)} tree={node} now={now}
-                    opening={opening} onOpen={item => void openSession(item)} onHide={hide} />)}
+                    opening={opening} onOpen={item => void openSession(item)} onHide={hide} searchQuery={needle} />)}
                 </ul>
                 {limit < visible.length && <button type="button" className="more" onClick={() => setLimit(value => value + pageSize)}>세션 더 보기</button>}
               </>

@@ -1,4 +1,4 @@
-import { sessionKey } from './tracked-state';
+import { isWorking, sessionKey } from './tracked-state';
 import type { Session } from './types';
 
 export type SessionTree<Row> = {
@@ -35,4 +35,11 @@ export function sessionTree<Row extends { session: Session }>(rows: Row[], paren
   // Use the first visible member's priority to place the group.
   for (const [key, row] of visible) attach(key, row);
   return roots;
+}
+
+
+export function hasPendingSessions<Row extends { session: Session }>(nodes: SessionTree<Row>[]): boolean {
+  return nodes.some(({ row: { session }, children }) =>
+    !!session.waiting || isWorking(session) || hasPendingSessions(children),
+  );
 }

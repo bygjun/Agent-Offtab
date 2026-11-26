@@ -261,6 +261,27 @@ time { font-variant-numeric: tabular-nums; }
 }
 .compact-list { margin: 0; padding: 0 8px; list-style: none; }
 .compact-list li + li { border-top: 1px solid var(--rule); }
+.session-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  min-height: 28px;
+  margin: 0 0 5px 15px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  list-style: none;
+}
+.session-group > summary::-webkit-details-marker { display: none; }
+.session-group > summary:hover { background: #222425; color: #efeeea; }
+.session-group > summary:focus-visible { outline: 2px solid var(--lime); outline-offset: 1px; }
+.session-group > summary svg { width: 13px; height: 13px; }
+.session-group[open] > summary svg { transform: rotate(90deg); }
+.compact .session-group > summary { margin-inline-start: 38px; }
+.compact-children .session-group > summary { margin-inline-start: 4px; }
 .session-children {
   margin: 0 0 6px 15px;
   padding: 0 0 0 9px;

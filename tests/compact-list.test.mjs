@@ -6,7 +6,7 @@ const bundle = await build({ stdin: {
   contents: "export * from './src/tracked-state'; export * from './src/session-tree';",
   resolveDir: process.cwd(),
 }, bundle: true, format: 'esm', platform: 'node', write: false });
-const { trackSessions, saveTracked, restoreTracked, markRead, hideSession, sessionKey, sessionTree } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`);
+const { trackSessions, saveTracked, restoreTracked, markRead, hideSession, sessionKey, sessionTree, hasPendingSessions } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`);
 const hour = 3_600_000;
 const time = 10_000;
 const key = 'codex:recent';
@@ -148,4 +148,19 @@ test('nested Claude sessions stay in one tree, and cyclic parent data never lose
   const cycle = sessionTree([third, second, first], []);
   assert.equal(cycle.length, 1);
   assert.equal(cycle[0].children[0].children[0].row, third);
+});
+
+
+test('groups open for work or waiting in any descendant, including detached background work', () => {
+  const claude = { ...session, provider: 'claude', active: false };
+  const parent = { session: { ...claude, id: 'parent', nativeId: 'local_parent', active: true } };
+  const branch = { session: { ...claude, id: 'branch', nativeId: 'local_branch', parentNativeId: 'local_parent' } };
+  const peer = { session: { ...claude, id: 'peer', parentNativeId: 'local_parent' } };
+  const leaf = { session: { ...claude, id: 'leaf', parentNativeId: 'local_branch' } };
+  const children = (state = {}) =>
+    sessionTree([parent, branch, peer, { session: { ...leaf.session, ...state } }], [])[0].children;
+  assert.equal(hasPendingSessions(children()), false);
+  for (const state of [{ active: true }, { waiting: 'input' }, { waiting: 'approval' }, { background: 1 }]) {
+    assert.equal(hasPendingSessions(children(state)), true);
+  }
 });
