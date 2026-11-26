@@ -56,6 +56,10 @@ pub struct Session {
     pub last_user_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_native_id: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub context_only: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_transcript: bool,
     #[serde(skip)]

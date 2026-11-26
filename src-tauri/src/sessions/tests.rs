@@ -468,3 +468,44 @@ fn completed_parent_remains_in_compact_scope_when_a_codex_child_is_running() {
     assert_eq!(rows[0].active, Some(false));
     assert_eq!(rows[0].background, 1);
 }
+
+#[test]
+fn claude_desktop_spawns_attach_to_stable_parents_outside_the_session_window() {
+    let dir = Fixture::new("desktop-session-tree");
+    let desktop = dir.0.join("desktop");
+    let workspace = desktop.join("account/workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let grandparent = format!("local_{OLD}");
+    let parent = format!("local_{FINISHED}");
+    let child = format!("local_{RUNNING}");
+    let ids = [(&grandparent, OLD, None), (&parent, FINISHED, Some(&grandparent)), (&child, RUNNING, Some(&parent))];
+    for (native_id, cli_id, parent_id) in ids {
+        fs::write(workspace.join(format!("{native_id}.json")), json!({
+            "sessionId":native_id,
+            "cliSessionId":cli_id,
+            "title":cli_id,
+            "lastActivityAt":NOW - WEEK_MS - 1,
+            "spawnedFrom":{"sessionId":parent_id,"sideSession":true},
+        }).to_string()).unwrap();
+    }
+    let mut collector = Collector::default();
+    let watched = [watch(Provider::Claude, RUNNING)];
+    let live = HashMap::new();
+    let scan = |collector: &mut Collector| {
+        collector.claude(&dir.0, &desktop, &compact_scope(&watched), Some(&live), &mut false).unwrap().1
+    };
+    let sessions = scan(&mut collector);
+    assert_eq!(sessions.len(), 3);
+    let find = |id| sessions.iter().find(|row| row.id == id).unwrap();
+    assert_eq!(find(RUNNING).parent_native_id.as_ref(), Some(&parent));
+    assert!(!find(RUNNING).context_only);
+    assert_eq!(find(FINISHED).parent_native_id.as_ref(), Some(&grandparent));
+    assert!(find(FINISHED).context_only);
+    assert!(find(FINISHED).active.is_none());
+    assert!(find(OLD).context_only);
+
+    fs::write(workspace.join(format!("{parent}.json")), json!({
+        "sessionId":parent,"cliSessionId":FINISHED,"isArchived":true,
+    }).to_string()).unwrap();
+    assert_eq!(scan(&mut collector).len(), 1);
+}

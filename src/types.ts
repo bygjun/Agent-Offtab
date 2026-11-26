@@ -17,6 +17,8 @@ export interface Session {
   activityAt?: number;
   lastUserAt?: number;
   nativeId?: string;
+  parentNativeId?: string;
+  contextOnly?: boolean;
   hasTranscript?: boolean;
 }
 

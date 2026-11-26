@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ProviderLogo } from './provider-logo';
 import { isWorking, sessionKey, type Entry, type TrackedSessions } from './tracked-state';
 import { TypedPreview } from './typed-preview';
+import { sessionTree, type SessionTree } from './session-tree';
 import type { Session } from './types';
 
 function priority(entry: Entry) {
@@ -33,8 +34,9 @@ export function SessionTitle({ session, className }: { session: Session; classNa
   </span>;
 }
 
-export function SessionRowActions({ children, className, onRead, onHide }: {
+export function SessionRowActions({ children, descendants, className, onRead, onHide }: {
   children: ReactNode;
+  descendants?: ReactNode;
   className?: string;
   onRead?: () => void;
   onHide(): void;
@@ -45,7 +47,7 @@ export function SessionRowActions({ children, className, onRead, onHide }: {
   useEffect(() => {
     if (!menu) return;
     const dismissOutside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !row.current?.contains(event.target)) setMenu(false);
+      if (event.target instanceof Element && event.target.closest('li') !== row.current) setMenu(false);
     };
     document.addEventListener('pointerdown', dismissOutside, true);
     return () => document.removeEventListener('pointerdown', dismissOutside, true);
@@ -58,6 +60,7 @@ export function SessionRowActions({ children, className, onRead, onHide }: {
         if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) setMenu(false);
       }}
       onContextMenu={event => {
+        if (!(event.target instanceof Element) || event.target.closest('li') !== event.currentTarget) return;
         event.preventDefault();
         setMenu(true);
       }}
@@ -65,6 +68,7 @@ export function SessionRowActions({ children, className, onRead, onHide }: {
         if (event.currentTarget.firstElementChild?.contains(event.target as Node)) setMenu(false);
       }}
       onKeyDown={event => {
+        if (!(event.target instanceof Element) || event.target.closest('li') !== event.currentTarget) return;
         if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
           event.preventDefault();
           setMenu(true);
@@ -83,12 +87,14 @@ export function SessionRowActions({ children, className, onRead, onHide }: {
         }}>읽음으로 표시</button>}
         <button type="button" autoFocus onClick={onHide}>목록에서 제외</button>
       </div>}
+      {descendants}
     </li>
   );
 }
 
-export function CompactList({ sessions, onOpen, onRead, onHide, opening, notice, loading }: {
+export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening, notice, loading }: {
   sessions: TrackedSessions;
+  parents: Session[];
   onOpen(session: Session): void;
   onRead(session: Session): void;
   onHide(session: Session): void;
@@ -98,38 +104,43 @@ export function CompactList({ sessions, onOpen, onRead, onHide, opening, notice,
 }) {
   const rows = [...sessions.values()].filter(entry => !entry.restoring && entry.hiddenAt === undefined)
     .sort((a, b) => priority(b) - priority(a) || b.workAt - a.workAt);
+  const tree = sessionTree<Pick<Entry, 'session' | 'readAt'>>(rows, parents.map(session => ({ session })));
+
+  function renderRow({ row: { session, readAt }, context, children }: SessionTree<Pick<Entry, 'session' | 'readAt'>>) {
+    const key = sessionKey(session);
+    const folder = session.cwd.split('/').filter(Boolean).at(-1);
+    const canRead = !context && !session.waiting && !isWorking(session) && session.active === false && readAt === undefined;
+    return (
+      <SessionRowActions key={key} onRead={canRead ? () => onRead(session) : undefined} onHide={() => onHide(session)}
+        descendants={children.length > 0 && <ul className="session-children" aria-label="하위 세션">{children.map(renderRow)}</ul>}>
+        <button type="button" className="compact-row" data-read={readAt !== undefined}
+          title="원본 세션 열기" disabled={opening === key}
+          onClick={() => onOpen(session)}>
+          <span className="compact-identity">
+            <span className={`provider-icon ${session.provider}`}><ProviderLogo provider={session.provider} /></span>
+            {folder && <span className="compact-folder" title={session.cwd}>{folder}</span>}
+          </span>
+          <span className="compact-content">
+            <span className="compact-heading">
+              <SessionTitle session={session} className="compact-title" />
+              {!context && <SessionStatus session={session} unread={readAt === undefined} />}
+            </span>
+            {!context && <TypedPreview text={session.preview} />}
+            {!context && <span className="sr-only">{readAt === undefined ? '읽지 않음' : '읽음'}</span>}
+          </span>
+        </button>
+      </SessionRowActions>
+    );
+  }
+
   return (
     <main className="compact-scroll" aria-busy={loading}>
       {notice && <p className="compact-notice" role="status">{notice}</p>}
-      {rows.length === 0 ? (
+      {tree.length === 0 ? (
         notice ? null : <p className="compact-empty">{loading ? '세션 확인 중…' : '진행 중인 세션이 없습니다.'}</p>
       ) : (
         <ul className="compact-list" aria-label="진행 중인 세션">
-          {rows.map(({ session, readAt }) => {
-            const key = sessionKey(session);
-            const folder = session.cwd.split('/').filter(Boolean).at(-1);
-            const canRead = !session.waiting && !isWorking(session) && session.active === false && readAt === undefined;
-            return (
-              <SessionRowActions key={key} onRead={canRead ? () => onRead(session) : undefined} onHide={() => onHide(session)}>
-                <button type="button" className="compact-row" data-read={readAt !== undefined}
-                  title="원본 세션 열기" disabled={opening === key}
-                  onClick={() => onOpen(session)}>
-                  <span className="compact-identity">
-                    <span className={`provider-icon ${session.provider}`}><ProviderLogo provider={session.provider} /></span>
-                    {folder && <span className="compact-folder" title={session.cwd}>{folder}</span>}
-                  </span>
-                  <span className="compact-content">
-                    <span className="compact-heading">
-                      <SessionTitle session={session} className="compact-title" />
-                      <SessionStatus session={session} unread={readAt === undefined} />
-                    </span>
-                    <TypedPreview text={session.preview} />
-                    <span className="sr-only">{readAt === undefined ? '읽지 않음' : '읽음'}</span>
-                  </span>
-                </button>
-              </SessionRowActions>
-            );
-          })}
+          {tree.map(renderRow)}
         </ul>
       )}
     </main>

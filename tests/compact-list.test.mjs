@@ -2,8 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 
-const bundle = await build({ entryPoints: ['src/tracked-state.ts'], bundle: true, format: 'esm', platform: 'node', write: false });
-const { trackSessions, saveTracked, restoreTracked, markRead, hideSession, sessionKey } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`);
+const bundle = await build({ stdin: {
+  contents: "export * from './src/tracked-state'; export * from './src/session-tree';",
+  resolveDir: process.cwd(),
+}, bundle: true, format: 'esm', platform: 'node', write: false });
+const { trackSessions, saveTracked, restoreTracked, markRead, hideSession, sessionKey, sessionTree } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`);
 const hour = 3_600_000;
 const time = 10_000;
 const key = 'codex:recent';
@@ -116,4 +119,33 @@ test('hiding survives restarts, agent-only activity, and Claude changing its tra
   rows = trackSessions(rows, scan([replied], time + 10 * hour + 100));
   assert.equal(rows.get(key).hiddenAt, undefined);
   assert.equal(rows.get(key).readAt, undefined);
+});
+
+
+test('a Claude child places its parent group first without tracking a context-only ancestor', () => {
+  const claude = { ...session, provider: 'claude' };
+  const parent = { session: { ...claude, id: 'parent', nativeId: 'local_parent', contextOnly: true } };
+  const child = { session: { ...claude, id: 'child', nativeId: 'local_child', parentNativeId: 'local_parent', waiting: 'input' } };
+  const sibling = { session: { ...claude, id: 'sibling', parentNativeId: 'local_parent', active: true } };
+  const unrelated = { session: { ...session, active: true } };
+  const roots = sessionTree([child, unrelated, sibling], [parent]);
+  assert.deepEqual(roots.map(node => node.row.session.id), ['parent', 'recent']);
+  assert.equal(roots[0].context, true);
+  assert.deepEqual(roots[0].children.map(node => node.row.session.id), ['child', 'sibling']);
+  assert.equal(sessionTree([child, parent], [])[0].context, false);
+  assert.equal(sessionTree([child], [])[0].row, child);
+  assert.equal(trackSessions(new Map(), snap([parent.session, child.session])).size, 1);
+});
+
+test('nested Claude sessions stay in one tree, and cyclic parent data never loses a row', () => {
+  const claude = { ...session, provider: 'claude' };
+  const first = { session: { ...claude, id: 'root', nativeId: 'local_root' } };
+  const second = { session: { ...claude, id: 'middle', nativeId: 'local_middle', parentNativeId: 'local_root' } };
+  const third = { session: { ...claude, id: 'leaf', nativeId: 'local_leaf', parentNativeId: 'local_middle' } };
+  const [root] = sessionTree([third], [first, second]);
+  assert.equal(root.children[0].children[0].row, third);
+  first.session.parentNativeId = 'local_leaf';
+  const cycle = sessionTree([third, second, first], []);
+  assert.equal(cycle.length, 1);
+  assert.equal(cycle[0].children[0].children[0].row, third);
 });

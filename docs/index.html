@@ -3,12 +3,125 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Codex와 Claude Code 채팅을 Mac 화면 옆에 띄워 두고 작업 상태와 최근 답변을 확인하세요.">
+  <meta name="description" content="Offtab을 Mac 화면 옆에 두고 Codex와 Claude Code가 어디까지 했는지 확인하세요.">
   <meta name="theme-color" content="#f2f4f3">
-  <title>Offtab · 에이전트 채팅을 화면 옆에</title>
+  <title>Offtab · 코덱스랑 클로드, 어디까지 했지?</title>
   <link rel="icon" href="assets/offtab.png" type="image/png">
-  <link rel="stylesheet" href="style.css">
-  <script src="workflow.js" defer></script>
+  <!-- Keep layout and markup in one response across Pages cache refreshes. -->
+  <style>
+    :root {
+      color-scheme: light;
+      font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+      --paper: #f2f4f3;
+      --ink: #20221c;
+      --muted: #52584b;
+      --rule: #cdd1ce;
+      --lime: #caf855;
+      --focus: #415d12;
+      color: var(--ink);
+      background: var(--paper);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; }
+    img { display: block; max-width: 100%; }
+    a { color: inherit; text-underline-offset: .22em; }
+    a:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+    ::selection { background: var(--lime); color: var(--ink); }
+    .wrap { width: min(calc(100% - 4rem), 65rem); margin-inline: auto; }
+
+    .site-header {
+      min-height: 4.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .75rem;
+      border-bottom: 1px solid var(--rule);
+    }
+    .wordmark { display: inline-flex; align-items: center; gap: .48rem; font-size: 1.3rem; font-weight: 750; text-decoration: none; }
+    .site-header nav { display: flex; gap: 1.45rem; }
+    .site-header nav a { display: inline-flex; align-items: center; min-height: 2.75rem; text-decoration: none; }
+    .site-header nav a:hover { text-decoration: underline; }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+      align-items: center;
+      gap: clamp(1.5rem, 4.3vw, 4rem);
+      padding-block: clamp(1.75rem, 4vw, 3.5rem);
+    }
+    h1, h2 { margin: 0; line-height: 1.15; letter-spacing: -.035em; word-break: keep-all; }
+    h1 { font-size: clamp(2.2rem, 5.35vw, 4.15rem); font-weight: 790; }
+    h2 { font-size: clamp(1.6rem, 3.1vw, 2.4rem); font-weight: 750; }
+    p, li, dd { word-break: keep-all; }
+    .intro p { max-width: 32ch; margin: 1rem 0 0; color: var(--muted); font-size: 1.075rem; }
+    .download {
+      display: inline-flex;
+      align-items: center;
+      min-height: 2.875rem;
+      margin-top: 1.35rem;
+      padding: .52rem .94rem;
+      border: 1px solid #839c44;
+      border-radius: .35rem;
+      background: var(--lime);
+      color: #1f2712;
+      font-weight: 750;
+      text-decoration: none;
+    }
+    .download:hover { background: #dbff87; }
+    .intro .system { max-width: none; margin-top: .5rem; font-size: .875rem; }
+
+    .screen { min-width: 0; margin: 0; }
+    .screen a { display: block; border-radius: .6rem; }
+    .screen img { width: 100%; height: auto; border-radius: inherit; }
+    .screen figcaption { margin-top: .65rem; color: var(--muted); font-size: .875rem; }
+    .screen figcaption strong { color: var(--ink); font-weight: 650; }
+    .screen--compact {
+      display: grid;
+      justify-items: center;
+      padding: clamp(1rem, 3.5vw, 2rem) 1rem .8rem;
+      background: #e6ebda;
+      border-radius: .85rem;
+    }
+    .screen--compact a { width: min(100%, 20rem); }
+    .screen--compact figcaption { text-align: center; }
+
+    .details, .install {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+      align-items: start;
+      gap: 1.5rem clamp(1.5rem, 4vw, 3.5rem);
+      border-top: 1px solid var(--rule);
+      padding: 2.5rem 0;
+    }
+    .details dl { margin: 1.15rem 0 0; }
+    .details dl div + div { margin-top: .8rem; }
+    .details dt { font-weight: 720; }
+    .details dd { margin: .14rem 0 0; color: var(--muted); }
+    .install p, .install ol { margin: 0; color: var(--muted); }
+    .install ol { margin-top: .65rem; padding-inline-start: 1.25rem; }
+    .install li + li { margin-top: .35rem; }
+    .install-links { display: flex; flex-wrap: wrap; gap: .15rem 1.05rem; margin-top: .5rem; }
+    .install-links a, .site-footer a { display: inline-flex; align-items: center; min-height: 2.75rem; color: var(--ink); }
+    .site-footer { display: flex; align-items: baseline; justify-content: space-between; gap: .35rem 1rem; border-top: 1px solid var(--rule); padding-block: .6rem 1.1rem; }
+    .site-footer p { margin: 0; font-size: .88rem; color: var(--muted); }
+    .site-footer a { font-size: .9rem; white-space: nowrap; }
+
+    @media (max-width: 50rem) {
+      .wrap { width: calc(100% - 2rem); }
+      .details { grid-template-columns: minmax(0, 1fr); }
+      .details dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+      .details dl div + div { margin: 0; }
+    }
+    @media (max-width: 42rem) {
+      .hero, .install { grid-template-columns: minmax(0, 1fr); }
+      .details, .install { padding-block: 1.75rem; }
+      .hero { gap: 1.5rem; }
+    }
+    @media (max-width: 28rem) {
+      .details dl { grid-template-columns: minmax(0, 1fr); gap: .8rem; }
+    }
+  </style>
 </head>
 <body>
   <header class="site-header wrap">
@@ -22,62 +135,60 @@
   <main class="wrap">
     <section class="hero" aria-labelledby="page-title">
       <div class="intro">
-        <h1 id="page-title">에이전트 채팅을<br>화면 옆에.</h1>
-        <div class="intro-copy">
-          <p>Codex와 Claude Code를 옆에 띄워 두세요. 작업 중인 채팅과 내 답변을 기다리는 채팅이 작은 창에 모입니다.</p>
-          <div class="intro-actions">
-            <a class="download" href="https://github.com/bygjun/Agent-Offtab/releases/download/v0.5.0/Offtab-0.5.0-arm64.dmg">Mac용 다운로드</a>
-            <a class="watch" href="#workflow">사용 영상 보기</a>
-          </div>
-          <p class="system">Apple Silicon · v0.5.0 프리뷰</p>
-        </div>
+        <h1 id="page-title">코덱스랑 클로드,<br>어디까지 했지?</h1>
+        <p>Codex와 Claude Code가 작업 중인지, 내 답을 기다리는지 Mac 화면 한쪽에서 확인하세요. 채팅을 누르면 원래 대화가 열려요.</p>
+        <a class="download" href="https://github.com/bygjun/Agent-Offtab/releases/download/v0.5.1/Offtab-0.5.1-arm64.dmg">Mac용 다운로드</a>
+        <p class="system">Apple Silicon · macOS 14 이상 권장 · v0.5.1 프리뷰</p>
       </div>
-
-      <figure class="workflow" id="workflow">
-        <video controls playsinline preload="none" width="1100" height="580"
-          poster="assets/offtab-workflow.webp" aria-label="Offtab에서 입력 대기를 확인하고 채팅을 여는 9초 예시">
-          <source src="assets/offtab-workflow.mp4" type="video/mp4">
-          <img src="assets/offtab-workflow.webp" width="1100" height="580" alt="작업 노트 오른쪽에 진행 중 및 완료 세션이 담긴 Offtab 창이 떠 있습니다.">
-        </video>
-        <figcaption>
-          <span>작업 노트 옆에서 입력 대기를 확인하고, 해당 채팅을 여는 모습입니다.</span>
-          <span>Offtab 화면 · 예시 데이터</span>
-        </figcaption>
+      <figure class="screen screen--compact">
+        <a href="assets/offtab-compact.webp" aria-label="최소화 화면 크게 보기">
+          <img src="assets/offtab-compact.webp" width="500" height="710" alt="입력 대기, 작업 중, 완료 상태가 표시된 Offtab의 작은 세션 창">
+        </a>
+        <figcaption><strong>최소화 화면</strong> · 다른 창 위에 고정할 수 있어요.</figcaption>
       </figure>
     </section>
 
-    <section class="usage" aria-labelledby="usage-title">
-      <h2 id="usage-title">작은 창에서 하는 일</h2>
-      <dl>
-        <div>
-          <dt>대기 중인 작업 확인</dt>
-          <dd>입력·승인 대기를 목록 위에 모읍니다. 백그라운드 작업이 끝나면 결과를 읽을 때까지 완료로 남습니다.</dd>
-        </div>
-        <div>
-          <dt>원본 채팅 열기</dt>
-          <dd>제목과 최근 메시지를 보고 세션을 클릭하면 해당 Codex 또는 Claude Code 채팅이 열립니다.</dd>
-        </div>
-        <div>
-          <dt>필요한 세션만 남기기</dt>
-          <dd>우클릭해 목록에서 제외할 수 있습니다. 해당 채팅에 새 메시지를 보내면 다시 표시됩니다.</dd>
-        </div>
-      </dl>
+    <section class="details" id="screens" aria-labelledby="details-title">
+      <div>
+        <h2 id="details-title">지난 채팅 찾기</h2>
+        <dl>
+          <div>
+            <dt>검색과 필터</dt>
+            <dd>제목, 작업 폴더, 최근 메시지로 검색하고 서비스별로 골라 볼 수 있어요.</dd>
+          </div>
+          <div>
+            <dt>당분간 안 볼 채팅은</dt>
+            <dd>우클릭해 ‘목록에서 제외’를 누르세요. 그 채팅에 새 메시지를 보내면 다시 나타나요.</dd>
+          </div>
+        </dl>
+      </div>
+      <figure class="screen">
+        <a href="assets/offtab-full.webp" aria-label="전체 창 크게 보기">
+          <img src="assets/offtab-full.webp" width="1040" height="740" loading="lazy" alt="서비스별 필터와 제목, 프로젝트, 대화 검색이 있는 Offtab 전체 창">
+        </a>
+        <figcaption><strong>전체 창</strong> · 두 화면 모두 예시 채팅 10개로 찍었습니다.</figcaption>
+      </figure>
     </section>
 
     <section id="install" class="install" aria-labelledby="install-title">
       <h2 id="install-title">Mac에 설치하기</h2>
       <div>
-        <p>DMG를 열고 Offtab을 응용 프로그램 폴더로 드래그하세요. Apple Silicon Mac용이며 macOS 14 이상을 권장합니다.</p>
-        <p class="install-links">
-          <a href="https://github.com/bygjun/Agent-Offtab/releases/tag/v0.5.0">릴리스 정보</a>
-          <a href="https://github.com/bygjun/Agent-Offtab#설치">자세한 설치 안내</a>
-        </p>
+        <p>Apple Silicon Mac에서 쓸 수 있어요. macOS 14 이상을 권장합니다.</p>
+        <ol>
+          <li><a href="https://github.com/bygjun/Agent-Offtab/releases/download/v0.5.1/Offtab-0.5.1-arm64.dmg">Offtab DMG</a>를 받으세요.</li>
+          <li>DMG를 열고 Offtab을 <strong>응용 프로그램</strong>으로 옮기세요.</li>
+          <li>Offtab을 열고 Codex 또는 Claude Code에서 작업을 시작해 보세요.</li>
+        </ol>
+        <div class="install-links">
+          <a href="https://github.com/bygjun/Agent-Offtab/releases/tag/v0.5.1">릴리스 정보</a>
+          <a href="https://github.com/bygjun/Agent-Offtab#문제-해결">설치·연결 문제 해결</a>
+        </div>
       </div>
     </section>
   </main>
 
   <footer class="site-footer wrap">
-    <p>대화 기록은 Mac에서 읽으며 외부 서버로 보내지 않습니다.</p>
+    <p>대화 기록은 이 Mac 안에서만 읽어요.</p>
     <a href="https://github.com/bygjun/Agent-Offtab/issues">문제 제보</a>
   </footer>
 </body>

@@ -261,6 +261,13 @@ time { font-variant-numeric: tabular-nums; }
 }
 .compact-list { margin: 0; padding: 0 8px; list-style: none; }
 .compact-list li + li { border-top: 1px solid var(--rule); }
+.session-children {
+  margin: 0 0 6px 15px;
+  padding: 0 0 0 9px;
+  list-style: none;
+  border-inline-start: 1px solid #55524b;
+}
+.session-children .session-children .session-children { margin-inline-start: 0; padding-inline-start: 5px; }
 .compact-row {
   display: grid;
   grid-template-columns: 53px minmax(0, 1fr);

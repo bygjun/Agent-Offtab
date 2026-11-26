@@ -73,7 +73,7 @@ export function trackSessions(previous: TrackedSessions, snapshot: Snapshot): Tr
   const isConfirmed = (session: Session) => ['ready', 'missing'].includes(statuses.get(session.provider) ?? '');
   for (const row of snapshot.sessions) {
     const record = recordKey(row);
-    if (removed.has(record)) continue;
+    if (removed.has(record) || row.contextOnly) continue;
     const key = sessionKey(row);
     const prior = next.get(key) ?? next.get(record);
     if (!prior && !isWorking(row) && !row.waiting && !row.recentlyActive) continue;
@@ -92,6 +92,7 @@ export function trackSessions(previous: TrackedSessions, snapshot: Snapshot): Tr
       if (!row.background) session.background = prior.session.background;
       session.waiting ??= prior.session.waiting;
       session.waitingAt ??= prior.session.waitingAt;
+      session.parentNativeId ??= prior.session.parentNativeId;
     }
     session.active ??= prior?.session.active;
     const wasWorking = !!prior && (isWorking(prior.session) || !!prior.session.waiting);

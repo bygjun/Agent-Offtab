@@ -48,6 +48,7 @@ struct ScanScope<'a> {
 struct DesktopInfo {
     id: String,
     native_id: String,
+    parent_native_id: Option<String>,
     title: String,
     cwd: String,
     at: i64,
@@ -531,6 +532,8 @@ impl Collector {
                     .max(turn.filter(|turn| turn.active).map_or(0, |turn| turn.at)),
                 last_user_at,
                 native_id: None,
+                parent_native_id: None,
+                context_only: false,
                 has_transcript,
                 terminal: scope
                     .activity
@@ -557,9 +560,15 @@ impl Collector {
         let turn_end = date(&data["lastTurnEdgeAt"]);
         let user_frame = date(&data["latestUserFrameAt"]);
         let has_answer_card = !text(&data["turnWrapUp"]["needsUser"]).trim().is_empty();
+        let spawned_from = &data["spawnedFrom"];
+        let parent_native_id = text(&spawned_from["sessionId"]);
         let info = DesktopInfo {
             id: text(&data["cliSessionId"]).to_owned(),
             native_id: text(&data["sessionId"]).to_owned(),
+            parent_native_id: (spawned_from["sideSession"] == true
+                && parent_native_id != text(&data["sessionId"])
+                && parent_native_id.strip_prefix("local_").is_some_and(is_uuid))
+            .then(|| parent_native_id.to_owned()),
             cwd: text(&data["cwd"]).to_owned(),
             title: text(&data["title"]).to_owned(),
             at: date(&data["lastActivityAt"]).max(date(&data["createdAt"])),
@@ -873,6 +882,34 @@ impl Collector {
                 }
             }
         }
+        // A child may still be visible long after its parent left the current time window.
+        let mut parents: Vec<_> = sessions
+            .values()
+            .filter_map(|session| session.parent_native_id.clone())
+            .collect();
+        while let Some(parent) = parents.pop() {
+            let Some(info) = native.get(parent.as_str()).filter(|info| !info.archived) else {
+                continue;
+            };
+            if sessions.contains_key(&info.id) {
+                continue;
+            }
+            let mut context = claude_session(
+                &info.id,
+                Some(info),
+                None,
+                false,
+                &info.title,
+                &info.cwd,
+                None,
+                info.at,
+            );
+            context.context_only = true;
+            if let Some(grandparent) = &context.parent_native_id {
+                parents.push(grandparent.clone());
+            }
+            sessions.insert(info.id.clone(), context);
+        }
         Ok((present, sessions.into_values().collect(), removed))
     }
 
@@ -1040,6 +1077,8 @@ fn claude_session(
         native_id: desktop
             .filter(|info| !info.native_id.is_empty())
             .map(|info| info.native_id.clone()),
+        parent_native_id: desktop.and_then(|info| info.parent_native_id.clone()),
+        context_only: false,
         has_transcript: false,
         terminal: None,
     }
