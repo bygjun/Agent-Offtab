@@ -92,10 +92,9 @@ export function SessionRowActions({ children, descendants, className, onRead, on
   );
 }
 
-export function SessionChildren<Row extends { session: Session }>({ nodes, render, compact, searchQuery }: {
+export function SessionChildren<Row extends { session: Session }>({ nodes, render, searchQuery }: {
   nodes: SessionTree<Row>[];
   render(node: SessionTree<Row>): ReactNode;
-  compact?: boolean;
   searchQuery?: string;
 }) {
   const disclosure = useRef<HTMLDetailsElement>(null);
@@ -106,7 +105,7 @@ export function SessionChildren<Row extends { session: Session }>({ nodes, rende
     if (disclosure.current && (pending || searchQuery)) disclosure.current.open = true;
   }, [collapsible, pending, searchQuery]);
 
-  const list = <ul className={compact ? 'session-children compact-children' : 'session-children'} aria-label="하위 세션">
+  const list = <ul className="session-children" aria-label="하위 세션">
     {nodes.map(render)}
   </ul>;
   return collapsible ? (
@@ -140,7 +139,7 @@ export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening
     const canRead = !context && !session.waiting && !isWorking(session) && session.active === false && readAt === undefined;
     return (
       <SessionRowActions key={key} onRead={canRead ? () => onRead(session) : undefined} onHide={() => onHide(session)}
-        descendants={children.length > 0 && <SessionChildren nodes={children} compact
+        descendants={children.length > 0 && <SessionChildren nodes={children}
           render={child => renderRow(child, session)} />}>
         <button type="button" className={parent ? 'compact-row compact-child-row' : 'compact-row'} data-read={readAt !== undefined}
           title="원본 세션 열기" disabled={opening === key}

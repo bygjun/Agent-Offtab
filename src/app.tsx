@@ -35,35 +35,36 @@ function ProviderIcon({ provider }: { provider: Filter }) {
   return <ProviderLogo provider={provider} />;
 }
 
-function SessionRow({ tree, now, onOpen, onHide, opening, searchQuery }: {
+function SessionRow({ tree, now, onOpen, onHide, opening, searchQuery, parent }: {
   tree: SessionTree<{ session: Session }>; now: number; onOpen: (item: Session) => void;
-  onHide: (item: Session) => void; opening?: string; searchQuery: string;
+  onHide: (item: Session) => void; opening?: string; searchQuery: string; parent?: Session;
 }) {
   const { row: { session: item }, context, children } = tree;
-  const folder = item.cwd.split('/').filter(Boolean).at(-1);
+  const folder = item.cwd === parent?.cwd ? undefined : item.cwd.split('/').filter(Boolean).at(-1);
   return (
     <SessionRowActions className="session-row" onHide={() => onHide(item)}
       descendants={children.length > 0 && <SessionChildren nodes={children} searchQuery={searchQuery}
         render={child => <SessionRow key={sessionKey(child.row.session)} tree={child} now={now}
-          opening={opening} onOpen={onOpen} onHide={onHide} searchQuery={searchQuery} />} />}>
-      <button type="button" className="session-open" title="원본 세션 열기"
+          opening={opening} onOpen={onOpen} onHide={onHide} searchQuery={searchQuery} parent={item} />} />}>
+      <button type="button" className={parent ? 'session-open session-child-open' : 'session-open'} title="원본 세션 열기"
         onClick={() => onOpen(item)} disabled={opening === sessionKey(item)}>
-      <span className="session-identity">
-        <span className={`provider-icon ${item.provider}`}><ProviderLogo provider={item.provider} /></span>
-        {folder && <span className="session-folder" title={item.cwd}>{folder}</span>}
-      </span>
-      <span className="conversation">
-        <span className="row-heading">
-          <SessionTitle session={item} className="session-title" />
-          {!context && (item.waiting || isWorking(item) ? <SessionStatus session={item} />
-            : <time dateTime={new Date(item.updatedAt).toISOString()} title={absoluteTime.format(item.updatedAt)}>
-                {timeLabel(item.updatedAt, now)}
-              </time>)}
+        {!parent && <span className="session-identity">
+          <span className={`provider-icon ${item.provider}`}><ProviderLogo provider={item.provider} /></span>
+          {folder && <span className="session-folder" title={item.cwd}>{folder}</span>}
+        </span>}
+        <span className="conversation">
+          <span className="row-heading">
+            <SessionTitle session={item} className="session-title" />
+            {!context && (item.waiting || isWorking(item) ? <SessionStatus session={item} />
+              : <time dateTime={new Date(item.updatedAt).toISOString()} title={absoluteTime.format(item.updatedAt)}>
+                  {timeLabel(item.updatedAt, now)}
+                </time>)}
+          </span>
+          {parent && folder && <span className="session-folder" title={item.cwd}>{folder}</span>}
+          {!context && (item.preview
+            ? <span className="preview">{item.role === 'user' && <span className="byline">나 · </span>}{item.preview}</span>
+            : <span className="preview unavailable">표시할 대화가 없습니다.</span>)}
         </span>
-        {!context && (item.preview
-          ? <span className="preview">{item.role === 'user' && <span className="byline">나 · </span>}{item.preview}</span>
-          : <span className="preview unavailable">표시할 대화가 없습니다.</span>)}
-      </span>
       </button>
     </SessionRowActions>
   );

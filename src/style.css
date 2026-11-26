@@ -155,6 +155,10 @@ kbd svg { width: 10px; height: 10px; }
   padding: 17px 0 16px;
 }
 .session-open { width: 100%; border: 0; background: transparent; text-align: left; }
+.session-child-open { display: block; padding: 7px 4px; border-radius: 4px; }
+.session-child-open .session-title { font-size: 13px; }
+.session-child-open .session-folder { display: block; margin-top: 2px; }
+.session-child-open .preview { margin: 3px 0 0; }
 .session-open:hover { background: #222425; }
 .session-open:focus-visible { outline-offset: -2px; }
 .session-row:last-child { border-bottom: 0; }
@@ -267,7 +271,7 @@ time { font-variant-numeric: tabular-nums; }
   gap: 4px;
   width: fit-content;
   min-height: 28px;
-  margin: 0 0 5px 15px;
+  margin: 0 0 5px 38px;
   padding: 2px 6px;
   border-radius: 4px;
   color: var(--muted);
@@ -280,25 +284,20 @@ time { font-variant-numeric: tabular-nums; }
 .session-group > summary:focus-visible { outline: 2px solid var(--lime); outline-offset: 1px; }
 .session-group > summary svg { width: 13px; height: 13px; }
 .session-group[open] > summary svg { transform: rotate(90deg); }
-.compact .session-group > summary { margin-inline-start: 38px; }
-.compact-children .session-group > summary { margin-inline-start: 4px; }
+.session-children .session-group > summary { margin-inline-start: 4px; }
 .session-children {
-  margin: 0 0 6px 15px;
-  padding: 0 0 0 9px;
-  list-style: none;
+  --branch-inset: 12px;
   --branch-line: #55524b;
+  margin: 0 0 6px 38px;
+  padding: 0;
+  padding-inline-start: var(--branch-inset);
+  list-style: none;
   border-inline-start: 1px solid var(--branch-line);
 }
-.session-children .session-children .session-children { margin-inline-start: 0; padding-inline-start: 5px; }
-.compact-children {
-  --branch-inset: 12px;
-  margin-inline-start: 38px;
-  padding-inline-start: var(--branch-inset);
-}
-.compact-children .compact-children { margin-inline-start: 4px; }
-.compact-children .compact-children .compact-children { --branch-inset: 6px; margin-inline-start: 0; padding-inline-start: var(--branch-inset); }
-.compact-children > li { position: relative; }
-.compact-children > li::before {
+.session-children .session-children { margin-inline-start: 4px; }
+.session-children .session-children .session-children { --branch-inset: 6px; margin-inline-start: 0; }
+.session-children > li { position: relative; }
+.session-children > li::before {
   content: '';
   position: absolute;
   inset-block-start: 16px;
