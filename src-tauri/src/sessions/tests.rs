@@ -488,6 +488,26 @@ fn claude_desktop_spawns_attach_to_stable_parents_outside_the_session_window() {
             "spawnedFrom":{"sessionId":parent_id,"sideSession":true},
         }).to_string()).unwrap();
     }
+    let preview_at = NOW - WEEK_MS - 1;
+    // The same desktop transcript can exist in several project directories.
+    for (project, at, reply) in [
+        ("current", preview_at, "The parent's latest visible reply."),
+        ("older-copy", preview_at - 100, "An earlier reply."),
+    ] {
+        let project = dir.0.join("projects").join(project);
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join(format!("{FINISHED}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                json!({"type":"assistant","timestamp":at,"entrypoint":"claude-desktop",
+                    "message":{"content":[{"type":"text","text":reply}]}}),
+                json!({"type":"user","timestamp":at+1,"turnOrigin":"host_synthetic",
+                    "message":{"content":"Internal handoff."}}),
+            ),
+        )
+        .unwrap();
+    }
     let mut collector = Collector::default();
     let watched = [watch(Provider::Claude, RUNNING)];
     let live = HashMap::new();
@@ -502,7 +522,11 @@ fn claude_desktop_spawns_attach_to_stable_parents_outside_the_session_window() {
     assert_eq!(find(FINISHED).parent_native_id.as_ref(), Some(&grandparent));
     assert!(find(FINISHED).context_only);
     assert!(find(FINISHED).active.is_none());
+    assert_eq!(find(FINISHED).preview, "The parent's latest visible reply.");
+    assert!(matches!(find(FINISHED).role, Some(Role::Assistant)));
+    assert_eq!(find(FINISHED).activity_at, preview_at);
     assert!(find(OLD).context_only);
+    assert!(find(OLD).preview.is_empty());
 
     fs::write(workspace.join(format!("{parent}.json")), json!({
         "sessionId":parent,"cliSessionId":FINISHED,"isArchived":true,

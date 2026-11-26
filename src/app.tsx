@@ -61,9 +61,9 @@ function SessionRow({ tree, now, onOpen, onHide, opening, searchQuery, parent }:
                 </time>)}
           </span>
           {parent && folder && <span className="session-folder" title={item.cwd}>{folder}</span>}
-          {!context && (item.preview
+          {item.preview
             ? <span className="preview">{item.role === 'user' && <span className="byline">나 · </span>}{item.preview}</span>
-            : <span className="preview unavailable">표시할 대화가 없습니다.</span>)}
+            : !context && <span className="preview unavailable">표시할 대화가 없습니다.</span>}
         </span>
       </button>
     </SessionRowActions>

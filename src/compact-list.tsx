@@ -154,7 +154,7 @@ export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening
               {!context && <SessionStatus session={session} unread={readAt === undefined} />}
             </span>
             {parent && folder && <span className="compact-folder" title={session.cwd}>{folder}</span>}
-            {!context && <TypedPreview text={session.preview} />}
+            <TypedPreview text={session.preview} />
             {!context && <span className="sr-only">{readAt === undefined ? '읽지 않음' : '읽음'}</span>}
           </span>
         </button>

@@ -697,6 +697,13 @@ impl Collector {
             }
         }
         let mut seen_transcripts = HashSet::new();
+        let parent_ids: HashSet<_> = meta
+            .sessions
+            .values()
+            .filter_map(|info| native.get(info.parent_native_id.as_deref()?))
+            .map(|info| info.id.as_str())
+            .collect();
+        let mut parent_transcripts: HashMap<&str, Vec<PathBuf>> = HashMap::new();
 
         for project in projects {
             if !is_dir(&project, partial) {
@@ -737,6 +744,12 @@ impl Collector {
                         continue;
                     }
                 };
+                if let Some(info) = info.filter(|info| parent_ids.contains(info.id.as_str())) {
+                    parent_transcripts
+                        .entry(info.id.as_str())
+                        .or_default()
+                        .push(path.clone());
+                }
                 let modified = stat.modified().map_or(0, epoch);
                 let boosted = info
                     .map_or(0, |info| info.at)
@@ -894,6 +907,18 @@ impl Collector {
             if sessions.contains_key(&info.id) {
                 continue;
             }
+            let latest = parent_transcripts
+                .remove(info.id.as_str())
+                .into_iter()
+                .flatten()
+                .filter_map(|path| match self.transcripts.read(&path, Provider::Claude, false) {
+                    Ok(log) => log.latest,
+                    Err(error) => {
+                        report_io(&error, partial);
+                        None
+                    }
+                })
+                .max_by_key(|message| message.at);
             let mut context = claude_session(
                 &info.id,
                 Some(info),
@@ -901,7 +926,7 @@ impl Collector {
                 false,
                 &info.title,
                 &info.cwd,
-                None,
+                latest,
                 info.at,
             );
             context.context_only = true;
