@@ -321,7 +321,6 @@ time { font-variant-numeric: tabular-nums; }
 .compact-status { display: flex; align-items: center; gap: 4px; color: var(--quiet); font-size: 10px; white-space: nowrap; }
 .compact-row[data-read="true"] .compact-title { font-weight: 520; }
 .compact-content .preview { font-size: 12px; margin: 3px 0 0; line-height: 1.45; }
-.compact-child-row .preview { -webkit-line-clamp: 1; }
 .compact-notice, .compact-empty { margin: 0; padding: 15px 13px; color: var(--muted); font-size: 12px; }
 .compact-notice { color: #e8b99a; }
 
