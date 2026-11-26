@@ -106,25 +106,31 @@ export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening
     .sort((a, b) => priority(b) - priority(a) || b.workAt - a.workAt);
   const tree = sessionTree<Pick<Entry, 'session' | 'readAt'>>(rows, parents.map(session => ({ session })));
 
-  function renderRow({ row: { session, readAt }, context, children }: SessionTree<Pick<Entry, 'session' | 'readAt'>>) {
+  function renderRow(
+    { row: { session, readAt }, context, children }: SessionTree<Pick<Entry, 'session' | 'readAt'>>,
+    parent?: Session,
+  ) {
     const key = sessionKey(session);
-    const folder = session.cwd.split('/').filter(Boolean).at(-1);
+    const folder = session.cwd === parent?.cwd ? undefined : session.cwd.split('/').filter(Boolean).at(-1);
     const canRead = !context && !session.waiting && !isWorking(session) && session.active === false && readAt === undefined;
     return (
       <SessionRowActions key={key} onRead={canRead ? () => onRead(session) : undefined} onHide={() => onHide(session)}
-        descendants={children.length > 0 && <ul className="session-children" aria-label="하위 세션">{children.map(renderRow)}</ul>}>
-        <button type="button" className="compact-row" data-read={readAt !== undefined}
+        descendants={children.length > 0 && <ul className="session-children compact-children" aria-label="하위 세션">
+          {children.map(child => renderRow(child, session))}
+        </ul>}>
+        <button type="button" className={parent ? 'compact-row compact-child-row' : 'compact-row'} data-read={readAt !== undefined}
           title="원본 세션 열기" disabled={opening === key}
           onClick={() => onOpen(session)}>
-          <span className="compact-identity">
+          {!parent && <span className="compact-identity">
             <span className={`provider-icon ${session.provider}`}><ProviderLogo provider={session.provider} /></span>
             {folder && <span className="compact-folder" title={session.cwd}>{folder}</span>}
-          </span>
+          </span>}
           <span className="compact-content">
             <span className="compact-heading">
               <SessionTitle session={session} className="compact-title" />
               {!context && <SessionStatus session={session} unread={readAt === undefined} />}
             </span>
+            {parent && folder && <span className="compact-folder" title={session.cwd}>{folder}</span>}
             {!context && <TypedPreview text={session.preview} />}
             {!context && <span className="sr-only">{readAt === undefined ? '읽지 않음' : '읽음'}</span>}
           </span>
@@ -140,7 +146,7 @@ export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening
         notice ? null : <p className="compact-empty">{loading ? '세션 확인 중…' : '진행 중인 세션이 없습니다.'}</p>
       ) : (
         <ul className="compact-list" aria-label="진행 중인 세션">
-          {tree.map(renderRow)}
+          {tree.map(node => renderRow(node))}
         </ul>
       )}
     </main>

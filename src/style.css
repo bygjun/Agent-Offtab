@@ -265,9 +265,28 @@ time { font-variant-numeric: tabular-nums; }
   margin: 0 0 6px 15px;
   padding: 0 0 0 9px;
   list-style: none;
-  border-inline-start: 1px solid #55524b;
+  --branch-line: #55524b;
+  border-inline-start: 1px solid var(--branch-line);
 }
 .session-children .session-children .session-children { margin-inline-start: 0; padding-inline-start: 5px; }
+.compact-children {
+  --branch-inset: 12px;
+  margin-inline-start: 38px;
+  padding-inline-start: var(--branch-inset);
+}
+.compact-children .compact-children { margin-inline-start: 4px; }
+.compact-children .compact-children .compact-children { --branch-inset: 6px; margin-inline-start: 0; padding-inline-start: var(--branch-inset); }
+.compact-children > li { position: relative; }
+.compact-children > li::before {
+  content: '';
+  position: absolute;
+  inset-block-start: 16px;
+  inset-inline-start: calc(-1 * var(--branch-inset));
+  width: calc(var(--branch-inset) - 2px);
+  height: 1px;
+  background: var(--branch-line);
+  pointer-events: none;
+}
 .compact-row {
   display: grid;
   grid-template-columns: 53px minmax(0, 1fr);
@@ -280,6 +299,8 @@ time { font-variant-numeric: tabular-nums; }
   border-radius: 4px;
   text-align: left;
 }
+.compact-child-row { display: block; padding: 7px 3px; }
+.compact-child-row .compact-folder { display: block; margin-top: 2px; }
 .compact-row:hover { background: #222425; }
 .compact-row:focus-visible { outline-offset: -3px; }
 .compact-identity { display: grid; justify-items: center; gap: 4px; min-width: 0; }
@@ -300,6 +321,7 @@ time { font-variant-numeric: tabular-nums; }
 .compact-status { display: flex; align-items: center; gap: 4px; color: var(--quiet); font-size: 10px; white-space: nowrap; }
 .compact-row[data-read="true"] .compact-title { font-weight: 520; }
 .compact-content .preview { font-size: 12px; margin: 3px 0 0; line-height: 1.45; }
+.compact-child-row .preview { -webkit-line-clamp: 1; }
 .compact-notice, .compact-empty { margin: 0; padding: 15px 13px; color: var(--muted); font-size: 12px; }
 .compact-notice { color: #e8b99a; }
 
