@@ -40,13 +40,19 @@ struct DeskState {
     hook_root: PathBuf,
     data: Arc<Mutex<Data>>,
     reads: ReadStore,
-    mobile: Arc<Mutex<mobile::Mobile>>,
-    mobile_relay: Arc<Mutex<RelayPreferences>>,
-    mobile_relay_path: PathBuf,
-    reply_dispatcher: mobile_reply::Dispatcher,
+    mobile: Option<Arc<MobileState>>,
     window: Mutex<Layout>,
     layout_path: PathBuf,
 }
+
+struct MobileState {
+    connections: Mutex<mobile::Mobile>,
+    relay: Mutex<RelayPreferences>,
+    relay_path: PathBuf,
+    dispatcher: mobile_reply::Dispatcher,
+}
+
+const MOBILE_DISABLED: &str = "휴대폰 연결을 사용하려면 Mac에서 중계 주소를 설정해 주세요.";
 
 #[tauri::command]
 async fn list_sessions(scope: ListScope, state: State<'_, DeskState>) -> Result<Snapshot, String> {
@@ -185,7 +191,11 @@ struct RelayPreferences {
 }
 
 impl RelayPreferences {
-    fn load(path: &std::path::Path) -> Result<Self, String> {
+    fn load(
+        path: &std::path::Path,
+        url: Option<&str>,
+        local_url: Option<&str>,
+    ) -> Result<Option<Self>, String> {
         let from_file = match fs::read(path) {
             Ok(bytes) => Some(
                 serde_json::from_slice::<Self>(&bytes)
@@ -194,21 +204,20 @@ impl RelayPreferences {
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(_) => return Err("저장된 중계 주소를 열지 못했습니다.".into()),
         };
-        if let Ok(url) = env::var("OFFTAB_RELAY_URL") {
-            let local_url = env::var("OFFTAB_RELAY_LOCAL_URL").ok().or_else(|| {
+        if let Some(url) = url {
+            let local_url = local_url.or_else(|| {
                 from_file
                     .as_ref()
                     .filter(|saved| saved.url.trim_end_matches('/') == url.trim_end_matches('/'))
-                    .and_then(|saved| saved.local_url.clone())
+                    .and_then(|saved| saved.local_url.as_deref())
             });
-            let active = Self::validate(&url, local_url.as_deref())?;
+            let active = Self::validate(url, local_url)?;
             active.save(path)?;
-            return Ok(active);
+            return Ok(Some(active));
         }
-        from_file.map_or_else(
-            || Self::validate("http://127.0.0.1:63915/", None),
-            |saved| Self::validate(&saved.url, saved.local_url.as_deref()),
-        )
+        from_file
+            .map(|saved| Self::validate(&saved.url, saved.local_url.as_deref()))
+            .transpose()
     }
 
     fn validate(url: &str, local_url: Option<&str>) -> Result<Self, String> {
@@ -242,6 +251,11 @@ impl RelayPreferences {
 }
 
 #[tauri::command]
+fn mobile_connection_enabled(state: State<'_, DeskState>) -> bool {
+    state.mobile.is_some()
+}
+
+#[tauri::command]
 async fn mobile_connection(
     enabled: Option<bool>,
     device: Option<String>,
@@ -257,15 +271,16 @@ async fn mobile_connection(
     let hook_root = state.hook_root.clone();
     let data = Arc::clone(&state.data);
     let reads = state.reads.clone();
-    let mobile = Arc::clone(&state.mobile);
-    let dispatcher = state.reply_dispatcher.clone();
-    let relay = Arc::clone(&state.mobile_relay);
-    let relay_path = state.mobile_relay_path.clone();
+    let mobile = state.mobile.clone().ok_or(MOBILE_DISABLED)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let mut mobile = mobile
+        let mut connections = mobile
+            .connections
             .lock()
             .map_err(|_| "휴대폰 연결 상태를 읽지 못했습니다.")?;
-        let mut preferences = relay.lock().map_err(|_| "중계 주소를 읽지 못했습니다.")?;
+        let mut preferences = mobile
+            .relay
+            .lock()
+            .map_err(|_| "중계 주소를 읽지 못했습니다.")?;
         let collect = move |watched: &[model::Watched]| {
             let mut data = data.lock().map_err(|_| "세션 목록을 읽지 못했습니다.")?;
             Ok(data
@@ -276,23 +291,23 @@ async fn mobile_connection(
             let updated = RelayPreferences::validate(&url, local_relay_url.as_deref())?;
             if updated.url != preferences.url
                 || updated.local_url != preferences.local_url
-                || mobile.startup_error().is_some()
+                || connections.startup_error().is_some()
             {
                 let mut restored = mobile::Mobile::with_reads(reads);
                 restored.restore(
                     &updated.url,
                     updated.local_url.as_deref(),
-                    dispatcher.clone(),
+                    mobile.dispatcher.clone(),
                     collect.clone(),
                 );
                 if let Some(error) = restored.startup_error() {
                     return Err(error.to_owned());
                 }
-                updated.save(&relay_path)?;
+                updated.save(&mobile.relay_path)?;
                 *preferences = updated;
-                *mobile = restored;
+                *connections = restored;
             } else {
-                updated.save(&relay_path)?;
+                updated.save(&mobile.relay_path)?;
             }
         }
         let devices = if let Some(value) = reply_enabled {
@@ -301,24 +316,24 @@ async fn mobile_connection(
                 (None, true) => mobile::ReplyTargets::All,
                 _ => return Err("답장 권한을 변경할 기기를 지정해 주세요.".into()),
             };
-            mobile.allow_reply(targets, value)?
+            connections.allow_reply(targets, value)?
         } else {
             match enabled {
-                Some(true) => mobile.start(
+                Some(true) => connections.start(
                     &preferences.url,
                     preferences.local_url.as_deref(),
                     label,
-                    dispatcher,
+                    mobile.dispatcher.clone(),
                     collect,
                 )?,
-                Some(false) => mobile.stop(device.as_deref().unwrap_or_default())?,
-                None => mobile.status(),
+                Some(false) => connections.stop(device.as_deref().unwrap_or_default())?,
+                None => connections.status(),
             }
         };
         let relay_url = preferences.url.clone();
         let local_relay_url = preferences.local_url.clone();
         drop(preferences);
-        drop(mobile);
+        drop(connections);
         Ok(MobileOverview {
             local_preview: mobile::is_local_preview(&relay_url),
             reachable: check_relay
@@ -335,16 +350,19 @@ async fn mobile_connection(
 }
 
 #[tauri::command]
-fn mobile_open_claude_access() {
+fn mobile_open_claude_access(state: State<'_, DeskState>) -> Result<(), String> {
+    state.mobile.as_ref().ok_or(MOBILE_DISABLED)?;
     #[cfg(target_os = "macos")]
     claude_desktop::request_access();
+    Ok(())
 }
 
 #[tauri::command]
 async fn mobile_open_preview(device: String, state: State<'_, DeskState>) -> Result<(), String> {
-    let mobile = Arc::clone(&state.mobile);
+    let mobile = state.mobile.clone().ok_or(MOBILE_DISABLED)?;
     tauri::async_runtime::spawn_blocking(move || {
         let url = mobile
+            .connections
             .lock()
             .map_err(|_| "미리보기 상태를 읽지 못했습니다.")?
             .preview_url(&device)
@@ -434,35 +452,39 @@ fn main() {
                 layout.restore(&window, Mode::Compact)?;
             }
             let home = app.path().home_dir()?;
-            let dispatcher = mobile_reply::Dispatcher::new(&home);
             let hook_root = app_data.join("session-observer");
             let data = Arc::new(Mutex::new(Data::default()));
             let reads = ReadStore::load(app_data.join("session-reads.json"));
-            let mobile = Arc::new(Mutex::new(mobile::Mobile::with_reads(reads.clone())));
             let relay_path = app_data.join("mobile-relay.json");
-            let preferences = RelayPreferences::load(&relay_path).unwrap_or_else(|error| {
+            let preferences = RelayPreferences::load(
+                &relay_path,
+                env::var("OFFTAB_RELAY_URL").ok().as_deref(),
+                env::var("OFFTAB_RELAY_LOCAL_URL").ok().as_deref(),
+            )
+            .unwrap_or_else(|error| {
                 eprintln!("{error}");
-                RelayPreferences {
-                    url: "http://127.0.0.1:63915/".into(),
-                    local_url: None,
-                }
+                None
             });
-            let mobile_relay = Arc::new(Mutex::new(preferences.clone()));
-            {
+            let mobile = preferences.map(|preferences| {
+                let mobile = Arc::new(MobileState {
+                    connections: Mutex::new(mobile::Mobile::with_reads(reads.clone())),
+                    relay: Mutex::new(preferences.clone()),
+                    relay_path,
+                    dispatcher: mobile_reply::Dispatcher::new(&home),
+                });
                 let home = home.clone();
                 let hook_root = hook_root.clone();
                 let data = Arc::clone(&data);
-                let dispatcher = dispatcher.clone();
-                let mobile = Arc::clone(&mobile);
+                let startup = Arc::clone(&mobile);
                 tauri::async_runtime::spawn_blocking(move || {
-                    if let Ok(mut mobile) = mobile.lock() {
-                        if mobile.initialized() {
+                    if let Ok(mut connections) = startup.connections.lock() {
+                        if connections.initialized() {
                             return;
                         }
-                        mobile.restore(
+                        connections.restore(
                             &preferences.url,
                             preferences.local_url.as_deref(),
-                            dispatcher,
+                            startup.dispatcher.clone(),
                             move |watched| {
                                 let mut data =
                                     data.lock().map_err(|_| "세션 목록을 읽지 못했습니다.")?;
@@ -473,16 +495,14 @@ fn main() {
                         );
                     }
                 });
-            }
+                mobile
+            });
             app.manage(DeskState {
-                reply_dispatcher: dispatcher,
                 home,
                 hook_root,
                 data,
                 reads,
                 mobile,
-                mobile_relay,
-                mobile_relay_path: relay_path,
                 window: Mutex::new(layout),
                 layout_path,
             });
@@ -500,6 +520,7 @@ fn main() {
             mark_sessions_read,
             open_session,
             session_hooks,
+            mobile_connection_enabled,
             mobile_connection,
             mobile_open_preview,
             mobile_open_claude_access,
@@ -522,6 +543,29 @@ mod relay_preferences_tests {
     use super::*;
 
     #[test]
+    fn mobile_requires_an_explicit_relay_url_or_saved_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mobile-relay.json");
+        assert!(RelayPreferences::load(&path, None, None).unwrap().is_none());
+        assert!(!path.exists());
+        assert!(RelayPreferences::load(&path, Some("https://relay.example/offtab"), None).is_err());
+        assert!(!path.exists());
+
+        let local = "http://127.0.0.1:63915/";
+        let selected = RelayPreferences::load(&path, Some(local), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.url, local);
+        assert_eq!(
+            RelayPreferences::load(&path, None, None)
+                .unwrap()
+                .unwrap()
+                .url,
+            local
+        );
+    }
+
+    #[test]
     fn persisted_relay_keeps_public_and_mac_local_addresses() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mobile-relay.json");
@@ -529,12 +573,16 @@ mod relay_preferences_tests {
             RelayPreferences::validate("https://offtab.example", Some("http://127.0.0.1:63915"))
                 .unwrap();
         config.save(&path).unwrap();
-        let decoded: RelayPreferences = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let decoded = RelayPreferences::load(&path, None, None).unwrap().unwrap();
         assert_eq!(decoded.url, "https://offtab.example/");
         assert_eq!(
             decoded.local_url.as_deref(),
             Some("http://127.0.0.1:63915/")
         );
+        let reopened = RelayPreferences::load(&path, Some("https://offtab.example"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.local_url, decoded.local_url);
         assert!(RelayPreferences::validate(
             "https://offtab.example",
             Some("https://other.example")

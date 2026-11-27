@@ -1,6 +1,6 @@
 [package]
 name = "session-desk"
-version = "0.5.21"
+version = "0.5.22"
 description = "A local inbox for Codex and Claude Code sessions"
 edition = "2021"
 

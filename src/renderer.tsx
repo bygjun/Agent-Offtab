@@ -11,15 +11,21 @@ const desk: DeskApi = {
   mode: value => invoke('window_mode', { value }),
   pin: value => invoke('window_pin', { value }),
   hooks: (provider, enabled) => invoke('session_hooks', { provider, enabled }),
-  mobile: {
-    connection: options => invoke('mobile_connection', options),
-    openPreview: device => invoke('mobile_open_preview', { device }),
-    openClaudeAccess: () => invoke('mobile_open_claude_access'),
-  },
   notifications: {
     async permission() { return await isPermissionGranted() || await requestPermission() === 'granted'; },
     send(title, body) { sendNotification({ title, body }); },
   },
 };
 
-createRoot(document.getElementById('root')!).render(<App desk={desk} persist />);
+async function render() {
+  if (await invoke<boolean>('mobile_connection_enabled').catch(() => false)) {
+    desk.mobile = {
+      connection: options => invoke('mobile_connection', options),
+      openPreview: device => invoke('mobile_open_preview', { device }),
+      openClaudeAccess: () => invoke('mobile_open_claude_access'),
+    };
+  }
+  createRoot(document.getElementById('root')!).render(<App desk={desk} persist />);
+}
+
+void render();
