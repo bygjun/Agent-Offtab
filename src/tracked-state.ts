@@ -1,4 +1,4 @@
-import type { Session, Snapshot } from './types';
+import type { ReadUpdate, Session, Snapshot } from './types';
 
 const hour = 3_600_000;
 export type Entry = { session: Session; workAt: number; activityAt: number; readAt?: number; hiddenAt?: number; restoring?: boolean };
@@ -8,13 +8,14 @@ export const sessionKey = (session: Session) => recordKey({ ...session, id: sess
 const storageKey = 'session-desk.tracked.v2';
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 
-export function restoreTracked(storage: Pick<Storage, 'getItem'>): TrackedSessions {
+export function restoreTracked(storage: Pick<Storage, 'getItem'>, remoteKey?: string): TrackedSessions {
   const entries: TrackedSessions = new Map();
-  const stored = storage.getItem(storageKey);
-  const raw: unknown = JSON.parse(stored ?? storage.getItem('session-desk.tracked.v1') ?? '[]');
+  const stored = storage.getItem(remoteKey ?? storageKey);
+  const raw: unknown = JSON.parse(stored ?? (remoteKey ? null : storage.getItem('session-desk.tracked.v1')) ?? '[]');
+  const validId = remoteKey ? /^[\w-]{22}$/ : uuid;
   if (!Array.isArray(raw)) return entries;
   for (const item of raw) {
-    if (!item || !['codex', 'claude'].includes(item.provider) || typeof item.id !== 'string' || !uuid.test(item.id)
+    if (!item || !['codex', 'claude'].includes(item.provider) || typeof item.id !== 'string' || !validId.test(item.id)
       || !Number.isSafeInteger(item.workAt) || !Number.isSafeInteger(item.activityAt)
       || (stored === null && item.provider === 'claude' && item.background > 0 && !item.active && !item.waiting)) continue;
     const session: Session = {
@@ -26,6 +27,7 @@ export function restoreTracked(storage: Pick<Storage, 'getItem'>): TrackedSessio
       nativeId: item.provider === 'claude' && typeof item.nativeId === 'string'
         && item.nativeId.startsWith('local_') && uuid.test(item.nativeId.slice(6)) ? item.nativeId : undefined,
       hasTranscript: item.hasTranscript === true ? true : undefined,
+      read: typeof item.readVersion === 'string' && item.readVersion.length <= 64 ? { version: item.readVersion } : undefined,
     };
     entries.set(sessionKey(session), { session, workAt: item.workAt, activityAt: item.activityAt,
       readAt: Number.isSafeInteger(item.readAt) ? item.readAt : undefined,
@@ -34,13 +36,13 @@ export function restoreTracked(storage: Pick<Storage, 'getItem'>): TrackedSessio
   return entries;
 }
 
-export function saveTracked(storage: Pick<Storage, 'getItem' | 'setItem'>, entries: TrackedSessions) {
+export function saveTracked(storage: Pick<Storage, 'getItem' | 'setItem'>, entries: TrackedSessions, key = storageKey) {
   const serialized = JSON.stringify([...entries.values()].map(({ session, workAt, activityAt, readAt, hiddenAt }) => ({
     provider: session.provider, id: session.id, active: session.active, background: session.background,
     nativeId: session.nativeId, hasTranscript: session.hasTranscript,
-    waiting: session.waiting, waitingAt: session.waitingAt, workAt, activityAt, readAt, hiddenAt,
+    waiting: session.waiting, waitingAt: session.waitingAt, workAt, activityAt, readAt, hiddenAt, readVersion: session.read?.version,
   })));
-  if (storage.getItem(storageKey) !== serialized) storage.setItem(storageKey, serialized);
+  if (storage.getItem(key) !== serialized) storage.setItem(key, serialized);
 }
 
 export function isWorking(session: Session) {
@@ -50,8 +52,18 @@ export function isWorking(session: Session) {
 export function markRead(previous: TrackedSessions, key: string, at: number, excludePending = false): TrackedSessions {
   const entry = previous.get(key);
   if (!entry || entry.readAt !== undefined || entry.activityAt > at || entry.workAt > at
-    || (excludePending && (entry.session.waiting || isWorking(entry.session)))) return previous;
+    || (excludePending && (entry.session.waiting || isWorking(entry.session) || entry.session.active !== false))) return previous;
   return new Map(previous).set(key, { ...entry, readAt: at });
+}
+
+export function readUpdates(entries: TrackedSessions): ReadUpdate[] {
+  const updates: ReadUpdate[] = [];
+  for (const { session, readAt, restoring } of entries.values()) {
+    if (restoring || readAt === undefined || !session.read || session.read.at !== undefined) continue;
+    updates.push({ provider: session.provider, id: session.nativeId ?? session.id, version: session.read.version, at: readAt });
+    if (updates.length === 12) break;
+  }
+  return updates;
 }
 
 export function hideSession(previous: TrackedSessions, session: Session, at: number): TrackedSessions {
@@ -100,16 +112,19 @@ export function trackSessions(previous: TrackedSessions, snapshot: Snapshot): Tr
     const changedWait = !!session.waiting && (session.waiting !== prior?.session.waiting || session.waitingAt !== prior?.session.waitingAt);
     const workAt = Math.max(session.activityAt ?? session.updatedAt, session.waitingAt ?? 0);
     const changedState = working !== wasWorking || changedWait;
+    const changedVersion = !!prior?.session.read && !!session.read && prior.session.read.version !== session.read.version;
+    const localReadAt = changedState || changedVersion || returned || workAt > (prior?.activityAt ?? 0) ? undefined : prior?.readAt;
     next.set(key, {
       session,
       workAt: Math.max(prior?.workAt ?? 0, workAt, changedState || returned ? snapshot.refreshedAt : 0),
       activityAt: Math.max(prior?.activityAt ?? 0, workAt),
-      readAt: changedState || returned || workAt > (prior?.activityAt ?? 0) ? undefined : prior?.readAt,
+      readAt: !working && session.active === false ? session.read?.at ?? localReadAt : localReadAt,
     });
   }
 
   for (const [key, entry] of next) {
-    if (entry.hiddenAt !== undefined || !isConfirmed(entry.session)) continue;
+    const hasSharedRead = found.has(key) && entry.session.read?.at !== undefined;
+    if (entry.hiddenAt !== undefined || (!isConfirmed(entry.session) && !hasSharedRead)) continue;
     if (!found.has(key)) {
       if (entry.restoring) { next.delete(key); continue; }
       if (isWorking(entry.session) || entry.session.waiting) {
@@ -119,7 +134,7 @@ export function trackSessions(previous: TrackedSessions, snapshot: Snapshot): Tr
       }
     }
     if (!entry.session.waiting && !isWorking(entry.session) && entry.session.active === false && entry.readAt !== undefined
-      && snapshot.refreshedAt >= Math.max(entry.readAt, entry.workAt) + hour) next.delete(key);
+      && snapshot.refreshedAt >= (entry.session.read?.at ?? Math.max(entry.readAt, entry.workAt)) + hour) next.delete(key);
   }
   return next;
 }

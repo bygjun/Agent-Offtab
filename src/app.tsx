@@ -3,7 +3,7 @@ import { Archive, ChevronDown, Command, Layers2, Maximize2, Minimize2, Pin, PinO
 import { day, type DeskApi, type ListScope, type Provider, type Session, type Snapshot, type Source, type WindowMode } from './types';
 import { CompactList, SessionChildren, SessionRowActions, SessionStatus, SessionTitle } from './compact-list';
 import { sessionTree, type SessionTree } from './session-tree';
-import { hideSession, isWorking, markRead, restoreTracked, saveTracked, sessionKey, trackSessions, type TrackedSessions } from './tracked-state';
+import { hideSession, isWorking, markRead, readUpdates, restoreTracked, saveTracked, sessionKey, trackSessions, type TrackedSessions } from './tracked-state';
 import { DeskSettings } from './desk-settings';
 import { ProviderLogo, providerNames as providers } from './provider-logo';
 import './style.css';
@@ -102,6 +102,7 @@ export function App({ desk, clock = Date.now, persist = false }: { desk: DeskApi
   const scroll = useRef<HTMLDivElement>(null);
   const inFlight = useRef(false);
   const openingRef = useRef(false);
+  const syncingReads = useRef(false);
   const alerted = useRef(new Map<string, string>());
   const alertsReady = useRef(false);
   const scope = useRef<ListScope>({ mode: 'compact', watched: [] });
@@ -143,6 +144,14 @@ export function App({ desk, clock = Date.now, persist = false }: { desk: DeskApi
     try { saveTracked(window.localStorage, tracked); setStorageError(false); }
     catch { setStorageError(true); }
   }, [tracked, persist]);
+
+  useEffect(() => {
+    if (!desk.syncReads || syncingReads.current) return;
+    const updates = readUpdates(tracked);
+    if (!updates.length) return;
+    syncingReads.current = true;
+    void desk.syncReads(updates).catch(() => {}).finally(() => { syncingReads.current = false; });
+  }, [desk, tracked]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -212,7 +221,10 @@ export function App({ desk, clock = Date.now, persist = false }: { desk: DeskApi
         return;
       }
       if (result === 'failed') throw new Error('Session could not be opened');
-      setTracked(previous => markRead(previous, key, clickedAt));
+      setTracked(previous => markRead(previous, key, clickedAt, true));
+      if (!tracked.has(key) && item.read && item.read.at === undefined) {
+        void desk.syncReads?.([{ provider: item.provider, id: item.nativeId ?? item.id, version: item.read.version, at: clickedAt }]).catch(() => {});
+      }
     } catch {
       setOpenError('채팅방을 열지 못했습니다. 다시 눌러 주세요.');
     } finally {
@@ -302,10 +314,10 @@ export function App({ desk, clock = Date.now, persist = false }: { desk: DeskApi
 
   return (
     <div className={`desk-mount app ${compactMode ? 'compact' : ''}`}>
-      <header className="window-bar" data-tauri-drag-region>
+      <header className={compactMode ? "window-bar compact-toolbar" : "window-bar"} data-tauri-drag-region>
         <span data-tauri-drag-region>{compactMode ? '진행 중 세션' : 'Offtab'}</span>
         <div className="window-actions">
-          {(desk.hooks || desk.notifications) && <button type="button" className="window-mode" aria-label="세션 설정"
+          {(desk.hooks || desk.notifications || desk.mobile) && <button type="button" className="window-mode" aria-label="세션 설정"
             aria-expanded={settingsOpen} title="세션 설정" onClick={() => setSettingsOpen(value => !value)}><Settings aria-hidden="true" /></button>}
           <button type="button" className="pin-window" aria-label="항상 위에 고정" aria-pressed={pinned}
             title={pinned ? '항상 위에 고정 해제' : '항상 위에 고정'} disabled={pinPending} onClick={() => void togglePin()}>

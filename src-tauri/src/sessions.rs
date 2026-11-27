@@ -535,6 +535,10 @@ impl Collector {
                 parent_native_id: None,
                 context_only: false,
                 has_transcript,
+                read: None,
+                cli_alive: opened == Some(true),
+                desktop_worker_alive: false,
+                transcript_path: has_transcript.then(|| row.path.clone()),
                 terminal: scope
                     .activity
                     .codex_terminals
@@ -820,6 +824,7 @@ impl Collector {
                     claude_session(id, info, run, processes.is_some(), title, cwd, latest, at);
                 session.last_user_at = log.last_user_at;
                 session.has_transcript = true;
+                session.transcript_path = Some(path.clone());
                 session.recently_active = message_at >= scope.work_since;
                 if let Some(at) = card_at {
                     session.waiting = Some(Waiting::Input);
@@ -1105,8 +1110,44 @@ fn claude_session(
         parent_native_id: desktop.and_then(|info| info.parent_native_id.clone()),
         context_only: false,
         has_transcript: false,
+        read: None,
         terminal: None,
+        cli_alive: run.is_some_and(|run| run.live_pid.is_some()),
+        desktop_worker_alive: run.is_some_and(|run| run.desktop && run.live_pid.is_some()),
+        transcript_path: None,
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn claude_session_in_use(
+    root: &Path,
+    id: &str,
+    own_pid: Option<u32>,
+) -> io::Result<bool> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .filter(|&pid| pid > 0 && Some(pid) != own_pid && i32::try_from(pid).is_ok())
+        else {
+            continue;
+        };
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            continue;
+        }
+        match json_file(&entry.path()) {
+            Ok(data) if data["sessionId"] == id => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 fn cli_runs(

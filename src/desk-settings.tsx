@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { DeskApi, HookStatus, Provider } from './types';
 import { providerNames } from './provider-logo';
+import { MobileSettings } from './mobile-settings';
 
 const providers = ['codex', 'claude'] as const;
 const statusLabel = { off: '연결 안 됨', connected: '설정됨', invalid: '설정 확인 필요' };
@@ -8,6 +9,7 @@ const statusLabel = { off: '연결 안 됨', connected: '설정됨', invalid: '�
 export function DeskSettings({ desk, alerts, onAlerts }: { desk: DeskApi; alerts: boolean; onAlerts: () => Promise<void> }) {
   const [hooks, setHooks] = useState<Partial<Record<Provider, HookStatus>>>({});
   const [busy, setBusy] = useState<Provider | 'alerts'>();
+  const [mobileOpen, setMobileOpen] = useState(false);
   const [notice, setNotice] = useState<string>();
   const showCodexGuide = hooks.codex === 'off' || hooks.codex === 'connected';
   useEffect(() => {
@@ -62,6 +64,10 @@ export function DeskSettings({ desk, alerts, onAlerts }: { desk: DeskApi; alerts
           .finally(() => setBusy(undefined));
       }} />
     </label>}
+    {desk.mobile && <details className="mobile-settings-section" onToggle={event => setMobileOpen(event.currentTarget.open)}>
+      <summary>휴대폰 연결</summary>
+      {mobileOpen && <MobileSettings mobile={desk.mobile} />}
+    </details>}
     {notice && <p role="status">{notice}</p>}
   </section>;
 }

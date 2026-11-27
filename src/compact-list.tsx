@@ -1,10 +1,11 @@
-import { ChevronRight, LoaderCircle } from 'lucide-react';
+import { ChevronRight, Ellipsis, LoaderCircle } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ProviderLogo } from './provider-logo';
 import { isWorking, sessionKey, type Entry, type TrackedSessions } from './tracked-state';
 import { TypedPreview } from './typed-preview';
 import { hasPendingSessions, sessionTree, type SessionTree } from './session-tree';
 import type { Session } from './types';
+import './compact-list.css';
 
 function priority(entry: Entry) {
   if (entry.session.waiting === 'approval') return 4;
@@ -34,12 +35,14 @@ export function SessionTitle({ session, className }: { session: Session; classNa
   </span>;
 }
 
-export function SessionRowActions({ children, descendants, className, onRead, onHide }: {
+export function SessionRowActions({ children, descendants, className, onRead, onHide, showMenuButton, rowAction }: {
   children: ReactNode;
   descendants?: ReactNode;
   className?: string;
   onRead?: () => void;
   onHide(): void;
+  showMenuButton?: boolean;
+  rowAction?: ReactNode;
 }) {
   const [menu, setMenu] = useState(false);
   const row = useRef<HTMLLIElement>(null);
@@ -54,7 +57,7 @@ export function SessionRowActions({ children, descendants, className, onRead, on
   }, [menu]);
 
   return (
-    <li ref={row} className={className}
+    <li ref={row} className={showMenuButton ? `compact-has-menu ${className ?? ""}` : className}
       onBlur={event => {
         // WebKit can blur a button before delivering its pointer click.
         if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) setMenu(false);
@@ -79,7 +82,10 @@ export function SessionRowActions({ children, descendants, className, onRead, on
         }
       }}>
       {children}
+      {showMenuButton && <button type="button" className="compact-menu-button" aria-label="세션 동작"
+        aria-expanded={menu} onClick={() => setMenu(open => !open)}><Ellipsis aria-hidden="true" /></button>}
       {menu && <div className="row-actions" aria-label="세션 동작" role="group">
+        {rowAction}
         {onRead && <button type="button" onClick={event => {
           event.currentTarget.closest('li')?.querySelector('button')?.focus({ preventScroll: true });
           onRead();
@@ -116,7 +122,7 @@ export function SessionChildren<Row extends { session: Session }>({ nodes, rende
   ) : list;
 }
 
-export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening, notice, loading }: {
+export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening, notice, loading, showMenuButton, rowTitle, rowAction }: {
   sessions: TrackedSessions;
   parents: Session[];
   onOpen(session: Session): void;
@@ -125,6 +131,9 @@ export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening
   opening?: string;
   notice?: string;
   loading: boolean;
+  showMenuButton?: boolean;
+  rowTitle?: (session: Session) => string;
+  rowAction?: (session: Session) => ReactNode;
 }) {
   const rows = [...sessions.values()].filter(entry => !entry.restoring && entry.hiddenAt === undefined)
     .sort((a, b) => priority(b) - priority(a) || b.workAt - a.workAt);
@@ -139,10 +148,11 @@ export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening
     const canRead = !context && !session.waiting && !isWorking(session) && session.active === false && readAt === undefined;
     return (
       <SessionRowActions key={key} onRead={canRead ? () => onRead(session) : undefined} onHide={() => onHide(session)}
+        showMenuButton={showMenuButton} rowAction={context ? undefined : rowAction?.(session)}
         descendants={children.length > 0 && <SessionChildren nodes={children}
           render={child => renderRow(child, session)} />}>
         <button type="button" className={parent ? 'compact-row compact-child-row' : 'compact-row'} data-read={readAt !== undefined}
-          title="원본 세션 열기" disabled={opening === key}
+          title={rowTitle?.(session) ?? "원본 세션 열기"} disabled={opening === key}
           onClick={() => onOpen(session)}>
           {!parent && <span className="compact-identity">
             <span className={`provider-icon ${session.provider}`}><ProviderLogo provider={session.provider} /></span>

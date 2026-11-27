@@ -2,6 +2,10 @@ import { useLayoutEffect, useRef, useState } from 'react';
 
 const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter() : undefined;
 
+export function graphemes(text: string) {
+  return segmenter ? Array.from(segmenter.segment(text), part => part.segment) : Array.from(text);
+}
+
 export function TypedPreview({ text }: { text: string }) {
   const latest = useRef(text);
   const preview = useRef<HTMLSpanElement>(null);
@@ -21,7 +25,7 @@ export function TypedPreview({ text }: { text: string }) {
     const suffix = text.slice(start);
     let end = start;
     const positions = [start];
-    for (const part of segmenter ? Array.from(segmenter.segment(suffix), part => part.segment) : Array.from(suffix)) {
+    for (const part of graphemes(suffix)) {
       end += part.length;
       positions.push(end);
     }

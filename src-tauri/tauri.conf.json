@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Offtab",
-  "version": "0.5.6",
+  "version": "0.5.21",
   "identifier": "local.sessiondesk.app",
   "build": {
     "beforeBuildCommand": "npm run build",
@@ -35,7 +35,6 @@
     "active": true,
     "targets": ["dmg"],
     "category": "DeveloperTool",
-    "icon": ["../build/icon.icns", "../build/icon.png"],
-    "macOS": { "signingIdentity": "-" }
+    "icon": ["../build/icon.icns", "../build/icon.png"]
   }
 }

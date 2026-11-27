@@ -6,7 +6,7 @@ const bundle = await build({ stdin: {
   contents: "export * from './src/tracked-state'; export * from './src/session-tree';",
   resolveDir: process.cwd(),
 }, bundle: true, format: 'esm', platform: 'node', write: false });
-const { trackSessions, saveTracked, restoreTracked, markRead, hideSession, sessionKey, sessionTree, hasPendingSessions } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`);
+const { trackSessions, saveTracked, restoreTracked, markRead, readUpdates, hideSession, sessionKey, sessionTree, hasPendingSessions } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`);
 const hour = 3_600_000;
 const time = 10_000;
 const key = 'codex:recent';
@@ -71,6 +71,40 @@ test('restores unread completions and read deadlines without saving message text
   saveTracked(storage, rows);
   assert.ok(trackSessions(restoreTracked(storage), snap([entry], time + hour + 99)).has(key));
   assert.ok(!trackSessions(restoreTracked(storage), snap([entry], time + hour + 100)).has(key));
+});
+
+test('a shared read timestamp aligns both views and a new revision clears it', () => {
+  const done = { ...session, active: false, recentlyActive: true, read: { version: '1:1:1' } };
+  const openedAt = time + 100;
+  const mac = markRead(trackSessions(new Map(), snap([done])), key, openedAt, true);
+  assert.deepEqual(readUpdates(mac), [{ provider: 'codex', id: session.id, version: done.read.version, at: openedAt }]);
+  const confirmed = { ...done, read: { ...done.read, at: openedAt } };
+  const mobile = trackSessions(new Map(), snap([confirmed], openedAt + 10_000));
+  assert.equal(mobile.get(key).readAt, openedAt);
+  assert.deepEqual(readUpdates(mobile), []);
+  assert.ok(!trackSessions(mobile, snap([confirmed], openedAt + hour)).has(key));
+  assert.ok(!trackSessions(mobile, snap([confirmed], openedAt + hour, 'partial')).has(key));
+  const next = { ...done, read: { version: '1:2:1' } };
+  assert.equal(trackSessions(mac, snap([next], openedAt + 10_000)).get(key).readAt, undefined);
+  const working = trackSessions(new Map(), snap([{ ...done, active: true, read: undefined }]));
+  assert.equal(markRead(working, key, openedAt, true), working);
+});
+
+test('mobile tracking restores only opaque session metadata and waits for the next user message', () => {
+  const id = 'abcdefghijklmnopqrstuv';
+  const key = `codex:${id}`;
+  const deviceKey = 'offtab.mobile.tracked.example';
+  const values = new Map();
+  const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  const active = { ...session, id, title: 'private title', preview: 'private preview', active: true, lastUserAt: time };
+  const hidden = hideSession(trackSessions(new Map(), snap([active])), active, time + 1);
+  saveTracked(storage, hidden, deviceKey);
+  assert.doesNotMatch(values.get(deviceKey), /private/);
+  assert.equal(restoreTracked(storage).size, 0);
+  const restored = restoreTracked(storage, deviceKey);
+  assert.equal(restored.get(key).hiddenAt, time + 1);
+  assert.equal(trackSessions(restored, snap([{ ...active, activityAt: time + 2 }])).get(key).hiddenAt, time + 1);
+  assert.equal(trackSessions(restored, snap([{ ...active, lastUserAt: time + 3 }])).get(key).hiddenAt, undefined);
 });
 
 test('waiting and detached jobs hold a session until the last job actually stops', () => {

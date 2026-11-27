@@ -17,7 +17,7 @@ pub enum Mode {
     Full,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
@@ -62,8 +62,16 @@ pub struct Session {
     pub context_only: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_transcript: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<crate::session_reads::ReadStatus>,
     #[serde(skip)]
     pub terminal: Option<crate::targets::TerminalTab>,
+    #[serde(skip)]
+    pub cli_alive: bool,
+    #[serde(skip)]
+    pub desktop_worker_alive: bool,
+    #[serde(skip)]
+    pub transcript_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]

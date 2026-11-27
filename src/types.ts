@@ -1,5 +1,7 @@
 export type Provider = 'codex' | 'claude';
 export type Waiting = 'input' | 'approval';
+export type ReadStatus = { version: string; at?: number };
+export type ReadUpdate = { provider: Provider; id: string; version: string; at: number };
 
 export interface Session {
   id: string;
@@ -20,6 +22,7 @@ export interface Session {
   parentNativeId?: string;
   contextOnly?: boolean;
   hasTranscript?: boolean;
+  read?: ReadStatus;
 }
 
 export interface Source {
@@ -40,12 +43,28 @@ export type OpenResult = 'opened' | 'unavailable' | 'failed' | 'terminal-permiss
 
 export type HookStatus = 'off' | 'connected' | 'invalid';
 
+export interface MobileConnection {
+  id: string;
+  label: string;
+  replyEnabled: boolean;
+  phase: 'scan' | 'pin' | 'paired' | 'locked' | 'expired' | 'revoking';
+  url: string | null;
+  pin: string | null;
+  interrupted: boolean;
+}
+
 export interface DeskApi {
   list(scope: ListScope): Promise<Snapshot>;
   open(provider: Provider, id: string): Promise<OpenResult>;
+  syncReads?(updates: ReadUpdate[]): Promise<void>;
   pin(value?: boolean): Promise<boolean>;
   mode?(value?: WindowMode): Promise<WindowMode>;
   hooks?(provider: Provider, enabled?: boolean): Promise<HookStatus>;
+  mobile?: {
+    connection(options?: { enabled?: boolean; device?: string; label?: string; replyEnabled?: boolean; allDevices?: boolean; relayUrl?: string; localRelayUrl?: string; checkRelay?: boolean }): Promise<{ localPreview: boolean; devices: MobileConnection[]; relayUrl?: string; localRelayUrl?: string | null; reachable?: boolean | null; claudeDesktopAccess?: boolean | null }>;
+    openPreview(device: string): Promise<void>;
+    openClaudeAccess?(): Promise<void>;
+  };
   notifications?: { permission(): Promise<boolean>; send(title: string, body: string): void };
 }
 

@@ -15,6 +15,7 @@ use std::{
 
 const CHUNK: u64 = 256 * 1024;
 const MAX_TAIL: u64 = 4 * 1024 * 1024;
+const MAX_CLAUDE_PREVIEW_TAIL: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Message {
@@ -372,20 +373,23 @@ pub fn user_body(text: &str) -> Option<Cow<'_, str>> {
     (!cleaned.trim().is_empty()).then_some(cleaned)
 }
 
-pub fn message(text: &str, role: Role, at: i64) -> Option<Message> {
+fn visible_message(text: &str, role: Role) -> Option<Cow<'_, str>> {
     static DIRECTIVES: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?m)^[ \t]*::[a-z][a-z0-9-]*\{[^\r\n]*\}[ \t]*\r?$")
             .expect("valid app-directive pattern")
     });
-    let cleaned = match role {
-        Role::Assistant => DIRECTIVES.replace_all(text, ""),
-        Role::User => user_body(text)?,
-    };
-    let text = preview_text(&cleaned);
+    match role {
+        Role::Assistant => Some(DIRECTIVES.replace_all(text, "")),
+        Role::User => user_body(text),
+    }
+}
+
+pub fn message(text: &str, role: Role, at: i64) -> Option<Message> {
+    let text = preview_text(&visible_message(text, role)?);
     (!text.is_empty()).then_some(Message { text, role, at })
 }
 
-fn codex_message(event: &Value) -> Option<Message> {
+fn codex_content(event: &Value) -> Option<(String, Role)> {
     let payload = &event["payload"];
     let (value, role) = match (
         text(&event["type"]),
@@ -402,7 +406,12 @@ fn codex_message(event: &Value) -> Option<Message> {
         }
         _ => return None,
     };
-    message(&value, role, date(&event["timestamp"]))
+    Some((value, role))
+}
+
+fn codex_message(event: &Value) -> Option<Message> {
+    let (text, role) = codex_content(event)?;
+    message(&text, role, date(&event["timestamp"]))
 }
 
 fn codex_turn(event: &Value) -> Option<Turn> {
@@ -420,7 +429,7 @@ fn codex_turn(event: &Value) -> Option<Turn> {
     })
 }
 
-fn claude_message(event: &Value) -> Option<Message> {
+fn claude_content(event: &Value) -> Option<(String, Role)> {
     let role = match text(&event["type"]) {
         "user" => Role::User,
         "assistant" => Role::Assistant,
@@ -429,11 +438,101 @@ fn claude_message(event: &Value) -> Option<Message> {
     if !is_claude_chat(event) {
         return None;
     }
-    message(
-        &content(&event["message"]["content"]),
-        role,
-        date(&event["timestamp"]),
-    )
+    Some((content(&event["message"]["content"]), role))
+}
+
+#[cfg(target_os = "macos")]
+pub fn claude_user_message_appended(
+    file: &mut File,
+    start: u64,
+    session_id: &str,
+    expected: &str,
+    images: usize,
+    files: &[String],
+) -> io::Result<bool> {
+    let end = file.metadata()?.len();
+    if end < start {
+        return Err(io::Error::other("Claude transcript changed unexpectedly"));
+    }
+    let limit = if images > 0 {
+        MAX_TAIL + crate::mobile_attachment::MAX_TOTAL_BYTES.div_ceil(3) as u64 * 4
+    } else {
+        MAX_TAIL
+    };
+    let scan_end = end.min(start.saturating_add(limit));
+    let bytes = read_range(file, start, scan_end)?;
+    let mut matched = false;
+    let mut loaded = HashSet::new();
+    for line in bytes.split_inclusive(|&byte| byte == b'\n') {
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if event["sessionId"] != session_id {
+            continue;
+        }
+        if !matched {
+            matched = claude_content(&event).is_some_and(|(body, role)| {
+                role == Role::User
+                    && matches_claude_desktop_body(&body, expected, files)
+                    && event["message"]["content"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|block| block["type"] == "image")
+                        .count()
+                        == images
+            });
+        } else if event["type"] == "attachment"
+            && event["isSidechain"] != true
+            && event["attachment"]["type"] == "file"
+            && event["attachment"]["content"]["type"] == "text"
+        {
+            let name = text(&event["attachment"]["filename"]);
+            if let Some(path) = files.iter().find(|path| path.as_str() == name) {
+                loaded.insert(path);
+            }
+        }
+        if matched && loaded.len() == files.len() {
+            return Ok(true);
+        }
+    }
+    if scan_end < end {
+        return Err(io::Error::other(
+            "Claude reply exceeds the confirmation window",
+        ));
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn matches_claude_desktop_body(body: &str, expected: &str, files: &[String]) -> bool {
+    let mut remaining = body.trim();
+    let mut seen = HashSet::new();
+    for _ in files {
+        let Some((_, rest)) = remaining
+            .strip_prefix("@\"")
+            .and_then(|rest| rest.split_once('"'))
+            .and_then(|(name, rest)| {
+                files
+                    .iter()
+                    .find(|path| path.as_str() == name)
+                    .map(|path| (path, rest))
+            })
+            .filter(|(path, _)| seen.insert(*path))
+        else {
+            return false;
+        };
+        remaining = rest.trim_start();
+    }
+    remaining == expected
+}
+
+fn claude_message(event: &Value) -> Option<Message> {
+    let (text, role) = claude_content(event)?;
+    message(&text, role, date(&event["timestamp"]))
 }
 
 fn is_claude_chat(event: &Value) -> bool {
@@ -494,25 +593,133 @@ fn read_range(file: &mut File, start: u64, end: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[derive(serde::Serialize)]
+pub struct VisibleTurn {
+    pub role: Role,
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub fn recent_visible_turns(
+    path: &Path,
+    provider: Provider,
+    limit: usize,
+) -> io::Result<Vec<VisibleTurn>> {
+    visible_turns(path, provider, limit, 48 * 1024, false)
+}
+
+pub fn last_assistant(path: &Path, provider: Provider) -> io::Result<Option<String>> {
+    Ok(visible_turns(path, provider, 1, 8_192, true)?
+        .pop()
+        .map(|turn| turn.text))
+}
+
+fn visible_turns(
+    path: &Path,
+    provider: Provider,
+    limit: usize,
+    mut bytes_left: usize,
+    assistant_only: bool,
+) -> io::Result<Vec<VisibleTurn>> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(MAX_TAIL);
+    let bytes = read_range(&mut file, start, len)?;
+    let boundary = if start == 0 {
+        0
+    } else {
+        bytes
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(bytes.len(), |index| index + 1)
+    };
+    let get_content = match provider {
+        Provider::Codex => codex_content,
+        Provider::Claude => claude_content,
+    };
+    let mut turns = Vec::new();
+    for line in bytes[boundary..].rsplit(|&byte| byte == b'\n') {
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let Some((raw, role)) = get_content(&event) else {
+            continue;
+        };
+        if assistant_only && role != Role::Assistant {
+            continue;
+        }
+        let Some(cleaned) = visible_message(&raw, role) else {
+            continue;
+        };
+        if preview_text(&cleaned).is_empty() {
+            continue;
+        }
+        let cleaned: String = cleaned
+            .trim_matches(['\r', '\n'])
+            .chars()
+            .filter(|ch| !ch.is_control() || matches!(ch, '\r' | '\n' | '\t'))
+            .collect();
+        if turns
+            .last()
+            .is_some_and(|turn: &VisibleTurn| turn.role == role && turn.text == cleaned)
+        {
+            continue;
+        }
+        let end = cleaned.floor_char_boundary(bytes_left);
+        if end == 0 {
+            break;
+        }
+        let truncated = end < cleaned.len();
+        let text = if truncated {
+            format!("{}…", cleaned[..end].trim_end())
+        } else {
+            cleaned.to_owned()
+        };
+        turns.push(VisibleTurn {
+            role,
+            text,
+            truncated,
+        });
+        bytes_left -= end;
+        if turns.len() >= limit || bytes_left == 0 {
+            break;
+        }
+    }
+    turns.reverse();
+    Ok(turns)
+}
+
 fn parse_log(
     file: &mut File,
     len: u64,
     provider: Provider,
     live: bool,
     previous: Option<(u64, &Log)>,
-    previous_user: Option<(u64, Option<i64>)>,
+    previous_append: Option<(u64, &Log)>,
 ) -> io::Result<Log> {
     let mut result = Log::default();
     let mut jobs = JobEvidence::default();
     let mut end = len;
     let floor = len.saturating_sub(MAX_TAIL);
+    let preview_floor = len.saturating_sub(MAX_CLAUDE_PREVIEW_TAIL);
     let mut carry = Vec::new();
     let get_message = match provider {
         Provider::Codex => codex_message,
         Provider::Claude => claude_message,
     };
-    while end > floor {
-        let start = floor.max(end.saturating_sub(CHUNK));
+    while end > 0 {
+        let preview_only = end <= floor;
+        if preview_only
+            && (provider != Provider::Claude
+                || end <= preview_floor
+                || result.latest.is_some()
+                || previous_append
+                    .is_some_and(|(offset, log)| end <= offset && log.latest.is_some()))
+        {
+            break;
+        }
+        let lower_bound = if preview_only { preview_floor } else { floor };
+        let start = lower_bound.max(end.saturating_sub(CHUNK));
         let mut bytes = read_range(file, start, end)?;
         bytes.append(&mut carry);
         let boundary = if start == 0 {
@@ -528,6 +735,13 @@ fn parse_log(
                 let Ok(event) = serde_json::from_slice::<Value>(line) else {
                     continue;
                 };
+                if preview_only {
+                    if let Some(message) = get_message(&event) {
+                        result.latest = Some(message);
+                        break;
+                    }
+                    continue;
+                }
                 let needs_user = result.last_user_at.is_none()
                     && match provider {
                         Provider::Codex => {
@@ -558,14 +772,17 @@ fn parse_log(
         };
         let tasks_covered = !live || previous.is_some_and(|(len, _)| end <= len);
         let user_covered =
-            result.last_user_at.is_some() || previous_user.is_some_and(|(len, _)| end <= len);
+            result.last_user_at.is_some() || previous_append.is_some_and(|(len, _)| end <= len);
         if result.latest.is_some() && user_covered && enough && tasks_covered {
             break;
         }
     }
     result.last_user_at = result
         .last_user_at
-        .max(previous_user.and_then(|(_, at)| at));
+        .max(previous_append.and_then(|(_, log)| log.last_user_at));
+    if provider == Provider::Claude && result.latest.is_none() {
+        result.latest = previous_append.and_then(|(_, log)| log.latest.clone());
+    }
     if let Some((_, old)) = previous {
         for id in &old.background {
             jobs.tasks.entry(id.clone()).or_insert(true);
@@ -612,7 +829,7 @@ impl TranscriptCache {
             provider,
             live,
             previous,
-            appended.map(|(old, _, log)| (old.len, log.last_user_at)),
+            appended.map(|(old, _, log)| (old.len, log)),
         )?;
         self.0.insert(path.to_owned(), (stamp, live, log.clone()));
         Ok(log)
@@ -629,6 +846,183 @@ impl TranscriptCache {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn claude_preview_survives_large_tool_only_appends() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"assistant","timestamp":1,"message":{"content":"캡처를 확인하고 있습니다."}})
+        )
+        .unwrap();
+        let mut cache = TranscriptCache::default();
+        cache.read(file.path(), Provider::Claude, true).unwrap();
+
+        let expect_preview = |cache: &mut TranscriptCache, expected: &str| {
+            let log = cache.read(file.path(), Provider::Claude, true).unwrap();
+            assert_eq!(
+                log.latest.as_ref().map(|message| message.text.as_str()),
+                Some(expected)
+            );
+        };
+        let tool_output =
+            json!({"type":"attachment","data":"x".repeat(CHUNK as usize)}).to_string();
+        let mut writer = file.reopen().unwrap();
+        writer.seek(SeekFrom::End(0)).unwrap();
+        for _ in 0..=(MAX_TAIL / CHUNK) {
+            writeln!(writer, "{tool_output}").unwrap();
+        }
+        expect_preview(&mut cache, "캡처를 확인하고 있습니다.");
+        expect_preview(&mut TranscriptCache::default(), "캡처를 확인하고 있습니다.");
+
+        for _ in 0..=(MAX_CLAUDE_PREVIEW_TAIL / CHUNK) {
+            writeln!(writer, "{tool_output}").unwrap();
+        }
+        expect_preview(&mut cache, "캡처를 확인하고 있습니다.");
+
+        writeln!(
+            writer,
+            "{}",
+            json!({"type":"assistant","timestamp":2,"message":{"content":"캡처를 확인했습니다."}})
+        )
+        .unwrap();
+        expect_preview(&mut cache, "캡처를 확인했습니다.");
+    }
+
+    #[test]
+    fn remote_history_keeps_recent_user_and_assistant_turns_in_order() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        let long = "한".repeat(5_000);
+        for (role, text) in [
+            ("user", "첫 질문"),
+            ("assistant", long.as_str()),
+            ("user", "다음 질문"),
+        ] {
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "type":role, "message":{"role":role,"content":[{"type":"text","text":text}]}
+                })
+            )
+            .unwrap();
+        }
+        let messages = recent_visible_turns(file.path(), Provider::Claude, 3).unwrap();
+        assert_eq!(
+            messages.iter().map(|turn| turn.role).collect::<Vec<_>>(),
+            [Role::User, Role::Assistant, Role::User]
+        );
+        assert_eq!(messages[1].text, long);
+        assert!(!messages[1].truncated);
+        assert!(last_assistant(file.path(), Provider::Claude)
+            .unwrap()
+            .unwrap()
+            .ends_with('…'));
+    }
+
+    #[test]
+    fn recent_assistant_body_ignores_user_turns_and_preserves_full_reply() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let body = format!(
+            "    code();\n\n첫 문단\n\n- **강조**와 `코드`\n- [링크](https://example.com)\n\n{}",
+            "답변 ".repeat(200)
+        );
+        for event in [
+            serde_json::json!({ "type": "assistant", "message": { "content": body } }),
+            serde_json::json!({ "type": "assistant", "isSynthetic": true, "message": { "content": "internal" } }),
+            serde_json::json!({ "type": "user", "message": { "content": "새 사용자 메시지" } }),
+        ] {
+            writeln!(file, "{event}").unwrap();
+        }
+        assert_eq!(
+            last_assistant(file.path(), Provider::Claude)
+                .unwrap()
+                .as_deref(),
+            Some(body.trim_matches(['\r', '\n']))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn desktop_reply_receipt_only_matches_a_new_complete_human_turn() {
+        use std::io::Write;
+
+        let mut log = tempfile::NamedTempFile::new().unwrap();
+        let message = serde_json::json!({
+            "type": "user",
+            "sessionId": "target",
+            "message": { "content": [{"type": "text", "text": "test reply"}] },
+        });
+        writeln!(log, "{message}").unwrap();
+        let start = log.as_file().metadata().unwrap().len();
+        let mut reader = log.reopen().unwrap();
+        assert!(
+            !claude_user_message_appended(&mut reader, start, "target", "test reply", 0, &[])
+                .unwrap()
+        );
+        let mut wrong_session = message.clone();
+        wrong_session["sessionId"] = "other".into();
+        let mut synthetic = message.clone();
+        synthetic["isSynthetic"] = true.into();
+        writeln!(log, "{wrong_session}\n{synthetic}").unwrap();
+        write!(log, "{message}").unwrap();
+        assert!(
+            !claude_user_message_appended(&mut reader, start, "target", "test reply", 0, &[])
+                .unwrap()
+        );
+        writeln!(log).unwrap();
+        assert!(
+            claude_user_message_appended(&mut reader, start, "target", "test reply", 0, &[])
+                .unwrap()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn desktop_attachment_receipt_waits_until_claude_loads_the_selected_file() {
+        use std::io::Write;
+
+        let mut log = tempfile::NamedTempFile::new().unwrap();
+        let files = ["/tmp/Offtab-qa-note.txt".to_owned()];
+        let attempt = |body: &str, image: Value| {
+            json!({
+                "type": "user", "sessionId": "target", "message": {
+                    "content": [image, {"type": "text", "text": body}]
+                }
+            })
+        };
+        let attachment = |path: &str| {
+            json!({
+                "type": "attachment", "sessionId": "target",
+                "attachment": {"type": "file", "filename": path, "content": {"type": "text"}}
+            })
+        };
+        let mut reader = log.reopen().unwrap();
+        let confirm = |reader: &mut File| {
+            claude_user_message_appended(reader, 0, "target", "read the file", 1, &files).unwrap()
+        };
+        let body = format!("@\"{}\"\nread the file", files[0]);
+        writeln!(
+            log,
+            "{}",
+            attempt(&body, json!({"type": "text", "text": ""}))
+        )
+        .unwrap();
+        writeln!(log, "{}", attachment(&files[0])).unwrap();
+        assert!(!confirm(&mut reader));
+
+        writeln!(log, "{}", attempt(&body, json!({"type": "image"}))).unwrap();
+        writeln!(log, "{}", attachment("/tmp/other.txt")).unwrap();
+        assert!(!confirm(&mut reader));
+        writeln!(log, "{}", attachment(&files[0])).unwrap();
+        assert!(confirm(&mut reader));
+    }
 
     #[test]
     fn codex_preview_skips_control_records_and_preserves_visible_text() {

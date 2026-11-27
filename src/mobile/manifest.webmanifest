@@ -1,0 +1,13 @@
+{
+  "name": "Offtab",
+  "short_name": "Offtab",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#171819",
+  "theme_color": "#171819",
+  "icons": [
+    { "src": "/offtab.png", "sizes": "any", "type": "image/png" }
+  ]
+}

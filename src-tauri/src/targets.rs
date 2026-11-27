@@ -22,6 +22,14 @@ pub enum Target {
     Terminal(TerminalTab),
 }
 
+pub const CLAUDE_BUNDLE: &str = "com.anthropic.claudefordesktop";
+
+pub fn claude_desktop_id(item: &Session) -> Option<&str> {
+    item.native_id
+        .as_deref()
+        .filter(|id| id.strip_prefix("local_").is_some_and(is_uuid))
+}
+
 pub fn target(item: &Session) -> Option<Target> {
     match item.provider {
         Provider::Codex if is_uuid(&item.id) => {
@@ -33,11 +41,7 @@ pub fn target(item: &Session) -> Option<Target> {
             })
         }
         Provider::Claude => {
-            if let Some(id) = item
-                .native_id
-                .as_deref()
-                .filter(|id| id.strip_prefix("local_").is_some_and(is_uuid))
-            {
+            if let Some(id) = claude_desktop_id(item) {
                 return Some(Target::Chat(
                     Provider::Claude,
                     format!("claude://code/continue?session={id}"),
@@ -55,7 +59,7 @@ pub fn open(target: &Target) -> OpenResult {
         Target::Chat(provider, url) => {
             let mut opener = Command::new("/usr/bin/open");
             if *provider == Provider::Claude {
-                opener.args(["-b", "com.anthropic.claudefordesktop"]);
+                opener.args(["-b", CLAUDE_BUNDLE]);
             }
             if opener
                 .arg(url)
