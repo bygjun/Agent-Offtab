@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { AppWindow, Clock3, FileText, Grip, Layers2, RotateCcw } from 'lucide-react';
 import { App } from './app';
 import { ProviderLogo } from './provider-logo';
-import { compactWindow, type DeskApi, type Session, type Waiting } from './types';
+import { compactWindow, day, type DeskApi, type Session, type Waiting } from './types';
 import './demo.css';
 
 type Edges = 'right' | 'bottom' | 'corner';
@@ -124,7 +124,7 @@ function Demo() {
   }
 
   function advanceTime() {
-    offset.current += 60 * 60_000;
+    offset.current += day;
     document.dispatchEvent(new Event('desk-demo-change'));
   }
 
@@ -196,7 +196,7 @@ function Demo() {
           <button type="button" onClick={simulateWork}>{working ? '예시 작업 완료' : '새 작업 시작'}</button>
           <button type="button" onClick={simulateWaiting}>대기 상태 전환</button>
           <button type="button" onClick={simulatePreview}>미리보기 변경</button>
-          <button type="button" onClick={advanceTime}><Clock3 aria-hidden="true" />1시간 뒤</button>
+          <button type="button" onClick={advanceTime}><Clock3 aria-hidden="true" />24시간 뒤</button>
         </div>
       </div>
       <div className="demo-caption">

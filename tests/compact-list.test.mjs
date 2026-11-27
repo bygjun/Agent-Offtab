@@ -8,6 +8,7 @@ const bundle = await build({ stdin: {
 }, bundle: true, format: 'esm', platform: 'node', write: false });
 const { trackSessions, saveTracked, restoreTracked, markRead, readUpdates, hideSession, sessionKey, sessionTree, hasPendingSessions } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`);
 const hour = 3_600_000;
+const day = 24 * hour;
 const time = 10_000;
 const key = 'codex:recent';
 const session = { id: 'recent', provider: 'codex', title: 'Example', preview: '', cwd: '/example', updatedAt: time, activityAt: time };
@@ -27,22 +28,23 @@ test('discovers active sessions and work completed between checks while ignoring
   assert.equal(rows.get(key).readAt, undefined);
 });
 
-test('background work stays visible and becomes unread on completion until the result is opened', () => {
+test('background work stays visible and read completions expire after 24 hours', () => {
   const active = trackSessions(new Map(), snap([{ ...session, active: true }]));
   active.get(key).readAt = time;
   const done = { ...session, active: false };
-  assert.ok(trackSessions(active, snap([{ ...session, active: true }], time + 2 * hour)).has(key));
+  assert.ok(trackSessions(active, snap([{ ...session, active: true }], time + 2 * day)).has(key));
   assert.equal(trackSessions(active, snap([done], time + 100, 'partial')).get(key).session.active, true);
   assert.equal(trackSessions(active, snap([], time + 100, 'error')).get(key).session.active, true);
   assert.equal(trackSessions(active, snap([], time + 100)).get(key).readAt, undefined);
   const stopped = trackSessions(active, snap([done], time + 5_000));
   assert.equal(stopped.get(key).readAt, undefined);
-  assert.ok(trackSessions(stopped, snap([done], time + 2 * hour)).has(key));
+  assert.ok(trackSessions(stopped, snap([done], time + 2 * day)).has(key));
   stopped.get(key).readAt = time + 6_000;
-  assert.ok(trackSessions(stopped, snap([done], time + hour + 5_999)).has(key));
-  assert.ok(!trackSessions(stopped, snap([done], time + hour + 6_000)).has(key));
-  assert.ok(trackSessions(stopped, snap([done], time + hour + 6_000, 'partial')).has(key));
-  assert.ok(trackSessions(stopped, snap([], time + hour + 6_000, 'error')).has(key));
+  assert.ok(trackSessions(stopped, snap([done], time + hour + 6_000)).has(key));
+  assert.ok(trackSessions(stopped, snap([done], time + day + 5_999)).has(key));
+  assert.ok(!trackSessions(stopped, snap([done], time + day + 6_000)).has(key));
+  assert.ok(trackSessions(stopped, snap([done], time + day + 6_000, 'partial')).has(key));
+  assert.ok(trackSessions(stopped, snap([], time + day + 6_000, 'error')).has(key));
 });
 
 test('a resumed session becomes unread and a timestamp regression does not reset read state', () => {
@@ -69,8 +71,8 @@ test('restores unread completions and read deadlines without saving message text
   assert.equal(trackSessions(restoreTracked(storage), snap([entry], time + 3 * hour)).get(key).readAt, undefined);
   rows = markRead(rows, key, time + 100, true);
   saveTracked(storage, rows);
-  assert.ok(trackSessions(restoreTracked(storage), snap([entry], time + hour + 99)).has(key));
-  assert.ok(!trackSessions(restoreTracked(storage), snap([entry], time + hour + 100)).has(key));
+  assert.ok(trackSessions(restoreTracked(storage), snap([entry], time + day + 99)).has(key));
+  assert.ok(!trackSessions(restoreTracked(storage), snap([entry], time + day + 100)).has(key));
 });
 
 test('a shared read timestamp aligns both views and a new revision clears it', () => {
@@ -82,8 +84,9 @@ test('a shared read timestamp aligns both views and a new revision clears it', (
   const mobile = trackSessions(new Map(), snap([confirmed], openedAt + 10_000));
   assert.equal(mobile.get(key).readAt, openedAt);
   assert.deepEqual(readUpdates(mobile), []);
-  assert.ok(!trackSessions(mobile, snap([confirmed], openedAt + hour)).has(key));
-  assert.ok(!trackSessions(mobile, snap([confirmed], openedAt + hour, 'partial')).has(key));
+  assert.ok(trackSessions(mobile, snap([confirmed], openedAt + day - 1)).has(key));
+  assert.ok(!trackSessions(mobile, snap([confirmed], openedAt + day)).has(key));
+  assert.ok(!trackSessions(mobile, snap([confirmed], openedAt + day, 'partial')).has(key));
   const next = { ...done, read: { version: '1:2:1' } };
   assert.equal(trackSessions(mac, snap([next], openedAt + 10_000)).get(key).readAt, undefined);
   const working = trackSessions(new Map(), snap([{ ...done, active: true, read: undefined }]));

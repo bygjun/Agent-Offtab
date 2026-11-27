@@ -1,6 +1,5 @@
-import type { ReadUpdate, Session, Snapshot } from './types';
+import { day, type ReadUpdate, type Session, type Snapshot } from './types';
 
-const hour = 3_600_000;
 export type Entry = { session: Session; workAt: number; activityAt: number; readAt?: number; hiddenAt?: number; restoring?: boolean };
 export type TrackedSessions = Map<string, Entry>;
 const recordKey = (session: Pick<Session, 'provider' | 'id'>) => `${session.provider}:${session.id}`;
@@ -134,7 +133,7 @@ export function trackSessions(previous: TrackedSessions, snapshot: Snapshot): Tr
       }
     }
     if (!entry.session.waiting && !isWorking(entry.session) && entry.session.active === false && entry.readAt !== undefined
-      && snapshot.refreshedAt >= (entry.session.read?.at ?? Math.max(entry.readAt, entry.workAt)) + hour) next.delete(key);
+      && snapshot.refreshedAt >= (entry.session.read?.at ?? Math.max(entry.readAt, entry.workAt)) + day) next.delete(key);
   }
   return next;
 }
