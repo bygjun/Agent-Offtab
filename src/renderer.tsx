@@ -19,6 +19,7 @@ const desk: DeskApi = {
 
 async function render() {
   if (await invoke<boolean>('mobile_connection_enabled').catch(() => false)) {
+    desk.publishCompact = view => invoke('publish_compact', { view });
     desk.mobile = {
       connection: options => invoke('mobile_connection', options),
       openPreview: device => invoke('mobile_open_preview', { device }),

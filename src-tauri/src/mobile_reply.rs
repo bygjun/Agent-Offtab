@@ -1,6 +1,6 @@
 use crate::codex_photo::{self, PhotoReply};
 use crate::mobile_attachment::Attachment;
-use crate::model::{is_uuid, Provider, Session};
+use crate::model::{is_uuid, ChoiceRequest, Provider, Session, Waiting};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -185,6 +185,44 @@ impl Dispatcher {
             Provider::Codex => self.codex.as_deref(),
             Provider::Claude => self.claude.as_deref(),
         }
+    }
+
+    pub fn can_answer_choice(&self, session: &Session, desktop_access: Option<bool>) -> bool {
+        session.waiting == Some(Waiting::Input)
+            && is_uuid(&session.id)
+            && !session.context_only
+            && session.transcript_path.is_some()
+            && session.waiting_details.as_ref().is_some_and(|details| details.choice.is_some())
+            && match session.provider {
+                Provider::Codex => self.codex_socket.exists(),
+                Provider::Claude => desktop_access == Some(true) && crate::targets::claude_desktop_id(session).is_some(),
+            }
+    }
+
+    pub fn answer_choice(&self, session: &Session, choice: &ChoiceRequest, selected: &[usize]) -> ResultCode {
+        if !self.can_answer_choice(session, claude_desktop_access()) {
+            return ResultCode::Unavailable;
+        }
+        let key = (session.provider, session.id.clone());
+        let Ok(mut jobs) = self.jobs.lock() else { return ResultCode::Unavailable };
+        if !jobs.insert(key.clone()) {
+            return ResultCode::Busy;
+        }
+        drop(jobs);
+        let result = match session.provider {
+            Provider::Codex => crate::codex_choice::answer(&self.codex_socket, session, choice, selected),
+            #[cfg(target_os = "macos")]
+            Provider::Claude => match selected {
+                [index] => crate::claude_desktop::answer_choice(session, choice, *index),
+                _ => ResultCode::Blocked,
+            },
+            #[cfg(not(target_os = "macos"))]
+            Provider::Claude => ResultCode::Unavailable,
+        };
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.remove(&key);
+        }
+        result
     }
 
     #[cfg(target_os = "macos")]
@@ -460,6 +498,7 @@ mod tests {
             active: Some(false),
             waiting: None,
             waiting_at: None,
+            waiting_details: None,
             background: 0,
             recently_active: false,
             activity_at: 0,

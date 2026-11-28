@@ -10,7 +10,7 @@ use std::{
 
 pub const READ_BATCH: usize = 12;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReadStatus {
     pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]

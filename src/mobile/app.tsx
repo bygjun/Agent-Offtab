@@ -2,15 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { createRoot } from 'react-dom/client';
 import { Radio } from 'lucide-react';
 import { CompactList } from '../compact-list';
-import { hideSession, markRead, readUpdates, restoreTracked, saveTracked, sessionKey, trackSessions, type TrackedSessions } from '../tracked-state';
-import type { Session, Snapshot } from '../types';
-import { forgetDevice, loadDevice, loadReplyHistory, saveReplyHistory, openSnapshot, queueReads, queueReply, scan, submitPin, view, type Device, type Receipt, type ReplyCode, type RelayView, type ReplyContext } from './connection';
+import { compactEntries, mirrorCompact, trackMirrored } from '../compact-state';
+import { markRead, readUpdates, restoreTracked, saveTracked, sessionKey, trackSessions, type TrackedSessions } from '../tracked-state';
+import type { CompactPosition, Session, Snapshot } from '../types';
+import { forgetDevice, loadDevice, loadReplyHistory, saveReplyHistory, openSnapshot, queueChoice, queueReads, queueReply, scan, submitPin, view, type Device, type Receipt, type ReplyCode, type RelayView, type ReplyContext } from './connection';
 import { ReplyComposer, replyLabels, type ReplyDraft, type ReplyProgress } from './reply';
 import { attachmentLimit, type AttachmentCapability } from './reply-attachment';
+import { turnKey, type ConversationCache } from './conversation-state';
 import './app.css';
 
-type MobileSession = Session & { canReply?: boolean; canReadAnswer?: boolean; canAttach?: boolean; desktopReply?: boolean; replyUnavailable?: keyof typeof replyUnavailableLabels };
-type MobileSnapshot = Omit<Snapshot, 'sessions'> & AttachmentCapability & { sessions: MobileSession[]; partial: boolean; deviceLabel?: string; permit?: string | null; receipt?: Receipt | null; receipts?: Receipt[]; context?: ReplyContext };
+type MobileSession = Session & { compact?: CompactPosition; canReply?: boolean; canReadAnswer?: boolean; canAttach?: boolean; desktopReply?: boolean; replyUnavailable?: keyof typeof replyUnavailableLabels };
+type MobileSnapshot = Omit<Snapshot, 'sessions'> & AttachmentCapability & { sessions: MobileSession[]; desktopCompact?: boolean; partial: boolean; deviceLabel?: string; permit?: string | null; receipt?: Receipt | null; receipts?: Receipt[]; context?: ReplyContext };
 type DeviceTracking = { id: string; entries: TrackedSessions };
 
 const replyUnavailableLabels = {
@@ -26,7 +28,6 @@ const emptyDraft: ReplyDraft = { text: '' };
 const validProgress = new Set(Object.keys(replyLabels));
 type ReplyEntry = { draft: ReplyDraft; progress?: ReplyProgress };
 const replyTimeout = 145_000;
-const replyConfirmationMs = 3_000;
 
 function isReplyConfirmed(code?: ReplyCode) {
   return code === 'sent' || code === 'queued';
@@ -37,7 +38,11 @@ const initialSyncGrace = 30_000;
 const trackingKey = (id: string) => `offtab.mobile.tracked.${id}`;
 
 function restoreMobileTracking(id: string): DeviceTracking {
-  try { return { id, entries: restoreTracked(localStorage, trackingKey(id)) }; }
+  try {
+    const entries = restoreTracked(localStorage, trackingKey(id));
+    for (const entry of entries.values()) delete entry.hiddenAt;
+    return { id, entries };
+  }
   catch { return { id, entries: new Map() }; }
 }
 
@@ -75,8 +80,7 @@ function storedReplies(value: unknown): Record<string, ReplyEntry> {
 function saveableReplies(entries: Record<string, ReplyEntry>) {
   const saved: Record<string, ReplyEntry> = {};
   for (const [key, { draft, progress }] of Object.entries(entries)) {
-    const savedProgress = isReplyConfirmed(progress?.code) ? undefined : progress;
-    if (draft.text || savedProgress) saved[key] = { draft: { text: draft.text }, progress: savedProgress };
+    if (draft.text || progress) saved[key] = { draft: { text: draft.text }, progress };
   }
   return saved;
 }
@@ -109,8 +113,6 @@ function App() {
   const [query, setQuery] = useState('');
   const [pairingAddress, setPairingAddress] = useState('');
   const fromPush = useRef(new URLSearchParams(location.search).get('waiting'));
-  const [lastHidden, setLastHidden] = useState<string>();
-  const [showHidden, setShowHidden] = useState(false);
   const persistence = useRef(Promise.resolve());
   const savedReplies = useRef<{ id: string; entries: Record<string, ReplyEntry> } | undefined>(undefined);
   const saveReplies = useCallback((target: Device, entries: Record<string, ReplyEntry>) => {
@@ -132,16 +134,16 @@ function App() {
   }, []);
   const sendingReply = useRef<{ key: string; id: string } | undefined>(undefined);
   const syncingReads = useRef(false);
-  const answers = useRef(new Map<string, { body: string; version: number }>());
+  const answers = useRef(new Map<string, ConversationCache>());
   const waitForDetail = useCallback((waiting: boolean) => {
     fastSync.current = waiting;
     if (waiting) wakeSync.current?.();
   }, []);
-  const rememberAnswer = useCallback((session: Session, body: string) => {
+  const rememberConversation = useCallback((key: string, conversation: ConversationCache) => {
     const cache = answers.current;
-    const key = sessionKey(session);
+    const previous = cache.get(key);
     cache.delete(key);
-    cache.set(key, { body, version: session.updatedAt });
+    cache.set(key, { ...previous, ...conversation });
     if (cache.size > 8) {
       const oldest = cache.keys().next();
       if (!oldest.done) cache.delete(oldest.value);
@@ -296,7 +298,10 @@ function App() {
               setSnapshot(payload);
               setTracking(previous => {
                 const sessionState = previous?.id === pairedDevice.id ? previous : restoreMobileTracking(pairedDevice.id);
-                return { id: pairedDevice.id, entries: trackSessions(sessionState.entries, forTracking(payload)) };
+                const entries = payload.desktopCompact
+                  ? trackMirrored(sessionState.entries, payload.sessions)
+                  : trackSessions(sessionState.entries, forTracking(payload));
+                return { id: pairedDevice.id, entries };
               });
             }
           } else if (sealed) {
@@ -389,58 +394,38 @@ function App() {
     });
   }
 
-  function hide(session: Session) {
-    setLastHidden(sessionKey(session));
-    setTracking(previous => previous && {
-      ...previous, entries: hideSession(previous.entries, session, Date.now()),
-    });
-  }
-
-  function undoHide(key: string) {
-    setTracking(previous => {
-      const entry = previous?.entries.get(key);
-      return previous && entry ? { ...previous, entries: new Map(previous.entries).set(key, { ...entry, hiddenAt: undefined }) } : previous;
-    });
-    setLastHidden(undefined);
-  }
-
+  const mirroredEntries = useMemo(() => snapshot?.desktopCompact ? mirrorCompact(snapshot.sessions) : undefined, [snapshot]);
   const visibleEntries = useMemo(() => {
-    const entries = tracking?.entries ?? new Map();
+    const entries = mirroredEntries ?? tracking?.entries ?? new Map();
     const text = query.trim().toLocaleLowerCase();
     if (!text) return entries;
     return new Map([...entries].filter(([, { session }]) =>
       [session.title, session.cwd, session.preview].some(value => value.toLocaleLowerCase().includes(text))));
-  }, [tracking, query]);
-  const hiddenEntries = [...(tracking?.entries ?? [])].filter(([, entry]) => entry.hiddenAt !== undefined && !entry.restoring);
+  }, [mirroredEntries, tracking, query]);
 
   const finishReply = useCallback((key: string, id: string, code: ReplyCode, retryable = false) => {
     if (code === 'processing') return;
     if (sendingReply.current?.id === id) sendingReply.current = undefined;
     const confirmed = isReplyConfirmed(code);
-    const confirmationDeadline = Date.now() + replyConfirmationMs;
+    const confirmedAt = confirmed ? Date.now() : undefined;
     setReplies(previous => {
       const entry = previous[key];
       if (entry?.progress?.id !== id || (entry.progress.code === code && Boolean(entry.progress.retryable) === retryable) ||
         (entry.progress.code !== 'processing' && entry.progress.code !== 'unknown')) return previous;
       return { ...previous, [key]: {
-        draft: confirmed ? emptyDraft : entry.draft,
-        progress: { ...entry.progress, code, retryable, deadline: confirmed ? confirmationDeadline : entry.progress.deadline },
+        draft: confirmed && !entry.progress.choiceToken ? emptyDraft : entry.draft,
+        progress: { ...entry.progress, code, retryable, confirmedAt },
       } };
     });
   }, []);
 
-  useEffect(() => {
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    for (const [key, { progress }] of Object.entries(replies)) {
-      if (!progress || !isReplyConfirmed(progress.code)) continue;
-      timers.push(setTimeout(() => setReplies(previous => {
-        const entry = previous[key];
-        if (entry?.progress !== progress) return previous;
-        return { ...previous, [key]: { draft: entry.draft } };
-      }), Math.max(0, progress.deadline - Date.now())));
-    }
-    return () => timers.forEach(timer => clearTimeout(timer));
-  }, [replies]);
+  const removeProgress = useCallback((key: string, id: string) => {
+    setReplies(previous => {
+      const entry = previous[key];
+      if (entry?.progress?.id !== id) return previous;
+      return { ...previous, [key]: { draft: entry.draft } };
+    });
+  }, []);
 
   const pendingReply = Object.entries(replies).find(([, entry]) => entry.progress?.code === 'processing');
   const pendingKey = pendingReply?.[0];
@@ -466,6 +451,10 @@ function App() {
   const latestRows = useMemo(() => new Map(snapshot?.sessions.map(session => [sessionKey(session), session])), [snapshot]);
   const parents = useMemo(() => snapshot?.sessions.filter(session => session.provider === 'claude') ?? [], [snapshot]);
   useEffect(() => {
+    if (!snapshot?.desktopCompact) return;
+    setSelectedSession(previous => previous && latestRows.has(sessionKey(previous)) ? previous : undefined);
+  }, [latestRows, snapshot?.desktopCompact]);
+  useEffect(() => {
     if (!fromPush.current || !snapshot) return;
     const target = snapshot.sessions.find(session => session.id === fromPush.current);
     fromPush.current = null;
@@ -475,14 +464,15 @@ function App() {
   const checking = sending || relay?.pending || sentAt.current !== null;
   const permit = device?.replyKey ? snapshot?.permit : undefined;
   const latestTarget = selectedSession && latestRows.get(sessionKey(selectedSession));
-  const modalSession = latestTarget ?? selectedSession;
+  const modalSession = latestTarget ?? (snapshot?.desktopCompact ? undefined : selectedSession);
   const replyKey = modalSession && sessionKey(modalSession);
   const replyEntry = replyKey ? replies[replyKey] : undefined;
-  const cachedAnswer = modalSession ? answers.current.get(sessionKey(modalSession)) : undefined;
+  const cachedConversation = replyKey ? answers.current.get(replyKey) : undefined;
   // The original Mac bridge accepted answer requests only with a reply permit.
   const canLoadAnswer = Boolean(online && device?.replyKey && latestTarget &&
     (latestTarget.canReadAnswer ?? (permit && !latestTarget.contextOnly)));
   const canSendTo = (session: Session) => Boolean(online && permit && latestRows.get(sessionKey(session))?.canReply);
+  const canChoose = Boolean(online && permit && device && latestTarget?.waiting === 'input' && latestTarget.choiceToken);
   const reason = modalSession?.replyUnavailable;
   const replyUnavailable = reason === 'desktop-claude'
     ? <>{replyUnavailableLabels[reason]} Remote Control을 켜둔 채팅은 <a href="https://claude.ai/code"
@@ -490,7 +480,7 @@ function App() {
     : !online ? 'Mac에 다시 연결되면 답장을 보낼 수 있어요.'
     : !snapshot?.permit ? 'Mac Offtab에서 이 기기의 답장을 허용해 주세요.'
       : !permit ? '답장을 사용하려면 Mac에서 새 QR로 연결해 주세요.'
-        : !latestTarget?.canReply ? (reason && replyUnavailableLabels[reason]) ?? replyUnavailableLabels.unavailable : undefined;
+        : !latestTarget?.canReply ? (canChoose ? '위에서 선택지로 답할 수 있어요.' : (reason && replyUnavailableLabels[reason]) ?? replyUnavailableLabels.unavailable) : undefined;
 
   function updateDraft(key: string, draft: ReplyDraft) {
     setReplies(previous => ({ ...previous, [key]: { ...previous[key], draft } }));
@@ -499,14 +489,24 @@ function App() {
   async function sendReply(target: Session, key: string, retry = false) {
     const entry = replies[key];
     if (!device || !permit || !entry || sendingReply.current || !canSendTo(target)
-      || (!retry && entry.progress?.code === 'unknown')) return;
+      || (!retry && (entry.progress?.code === 'unknown' || (!entry.progress?.choiceToken && isReplyConfirmed(entry.progress?.code))))) return;
     const attachments = entry.draft.attachments ?? [];
     const previous = entry.progress;
     const startedAt = retry ? previous?.startedAt : Date.now();
     if (!startedAt || (retry && (!previous?.retryable || !attachments.length || Date.now() >= startedAt + 120_000))) return;
     const id = retry && previous ? previous.id : crypto.randomUUID();
     sendingReply.current = { key, id };
-    const progress: ReplyProgress = { id, startedAt, code: 'processing', deadline: Date.now() + replyTimeout + (attachments.length ? 100_000 : 0) };
+    const progress: ReplyProgress = {
+      id, startedAt, code: 'processing', deadline: Date.now() + replyTimeout + (attachments.length ? 100_000 : 0),
+      message: retry && previous?.message ? previous.message : {
+        text: entry.draft.text.trim(),
+        attachments: attachments.length ? attachments.map(file => ({
+          kind: file.mime.startsWith('image/') ? 'image' : 'file', name: file.name,
+        })) : undefined,
+        after: Math.max(target.lastUserAt ?? 0, snapshot?.refreshedAt ?? 0) - 1,
+        baseline: answers.current.get(key)?.turns?.slice(-4).map(turnKey),
+      },
+    };
     const next = { ...replies, [key]: { draft: entry.draft, progress } };
     setReplies(next);
     setUpload(attachments.length ? { id, percent: 0 } : undefined);
@@ -521,6 +521,31 @@ function App() {
       if (currentDevice.current === device.id) finishReply(key, id, 'unknown', attachments.length > 0);
     } finally {
       setUpload(previous => previous?.id === id ? undefined : previous);
+    }
+  }
+
+  async function sendChoice(target: Session, key: string, answers: number[]) {
+    const current = latestRows.get(key);
+    const token = current?.choiceToken;
+    const questions = current?.waitingDetails?.questions;
+    const previous = replies[key]?.progress;
+    if (!device || !permit || !online || !token || token !== target.choiceToken || current?.waiting !== 'input'
+      || !questions || questions.length !== answers.length || sendingReply.current || previous?.code === 'unknown'
+      || (previous?.choiceToken === token && previous.code === 'sent')
+      || questions.some((question, i) => !Number.isInteger(answers[i]) || answers[i] < 0 || answers[i] >= question.options.length)) return;
+    const id = crypto.randomUUID();
+    const progress: ReplyProgress = { id, choiceToken: token, code: 'processing', deadline: Date.now() + replyTimeout };
+    const next = { ...replies, [key]: { draft: replies[key]?.draft ?? emptyDraft, progress } };
+    sendingReply.current = { key, id };
+    setReplies(next);
+    wakeSync.current?.();
+    try {
+      if (!storageError) await saveReplies(device, next).catch(() => {});
+      if (currentDevice.current !== device.id) return;
+      const code = await queueChoice(device, id, target, permit, token, answers);
+      if (code && currentDevice.current === device.id) finishReply(key, id, code);
+    } catch {
+      if (currentDevice.current === device.id) finishReply(key, id, 'unknown');
     }
   }
 
@@ -566,13 +591,6 @@ function App() {
       </div>
       {storageError && <p className="notice" role="status">브라우저에 초안을 저장하지 못했습니다. 이 화면에서 계속 작성할 수 있습니다.</p>}
       {error && <p className="notice" role="status">{error}</p>}
-      {lastHidden && <p className="notice" role="status">목록에서 제외했습니다. <button onClick={() => undoHide(lastHidden)}>실행 취소</button></p>}
-      {hiddenEntries.length > 0 && <div className="mobile-hidden-tools">
-        <button type="button" aria-expanded={showHidden} onClick={() => setShowHidden(value => !value)}>제외한 세션 {hiddenEntries.length}개</button>
-        {showHidden && <ul>{hiddenEntries.map(([key, { session }]) => <li key={key}>
-          <span>{session.title || '제목 없음'}</span><button type="button" onClick={() => undoHide(key)}>다시 표시</button>
-        </li>)}</ul>}
-      </div>}
       {!online && !syncWaiting && !error && <p className="notice" role="status">
         Mac에 연결되면 자동으로 동기화를 다시 시작합니다.
       </p>}
@@ -582,21 +600,23 @@ function App() {
         unavailable={replyUnavailable} permit={reason === 'desktop-claude' ? undefined : permit} canLoadAnswer={canLoadAnswer} canAttach={latestTarget?.canAttach === true}
         maxTotalBytes={Math.min(attachmentLimit(snapshot), attachmentLimit(relay))}
         textOnly={modalSession.desktopReply === true}
-        initialAnswer={cachedAnswer?.version === modalSession.updatedAt ? cachedAnswer?.body : undefined}
-        draft={replyEntry?.draft ?? emptyDraft} outcome={replyEntry?.progress?.code}
+        initialConversation={cachedConversation}
+        draft={replyEntry?.draft ?? emptyDraft} progress={replyEntry?.progress}
         uploadPercent={upload && upload.id === replyEntry?.progress?.id ? upload.percent : undefined}
         otherPending={Boolean(pendingKey && pendingKey !== replyKey)}
         onDraft={draft => updateDraft(replyKey, draft)} onSend={() => void sendReply(modalSession, replyKey)}
+        onChoose={canChoose ? answers => void sendChoice(modalSession, replyKey, answers) : undefined}
         onRetry={!replyUnavailable && !pendingKey && replyEntry?.progress?.retryable && replyEntry.draft.attachments?.length &&
           replyEntry.progress.startedAt && Date.now() < replyEntry.progress.startedAt + 120_000
           ? () => void sendReply(modalSession, replyKey, true) : undefined}
-        onDismiss={() => setReplies(previous => ({ ...previous, [replyKey]: { draft: previous[replyKey]?.draft ?? emptyDraft } }))}
-        receipt={receipt} receipts={receipts} context={snapshot?.context} onWait={waitForDetail} onAnswer={rememberAnswer} onClose={() => setSelectedSession(undefined)} />}
+        onDismiss={id => removeProgress(replyKey, id)}
+        receipt={receipt} receipts={receipts} context={snapshot?.context} onWait={waitForDetail}
+        onConversation={rememberConversation} onClose={() => setSelectedSession(undefined)} />}
       {snapshot?.partial && <p className="notice" role="status">일부 세션을 읽지 못했습니다.</p>}
       {(snapshot || (!error && syncWaiting)) && <CompactList
         sessions={visibleEntries} parents={parents} loading={!snapshot}
-        notice={query.trim() && ![...visibleEntries.values()].some(entry => entry.hiddenAt === undefined) ? '검색 결과가 없습니다.' : undefined}
-        onOpen={openRow} onRead={read} onHide={hide} showMenuButton
+        notice={query.trim() && !compactEntries(visibleEntries).length ? '검색 결과가 없습니다.' : undefined}
+        onOpen={openRow} onRead={read} showMenuButton
         rowTitle={() => '대화 열기'}
         rowAction={session => canSendTo(session) && <button type="button" className="reply-link"
           onClick={() => openRow(session)} aria-label={`${session.title}에 답장`}>답장하기</button>} />}

@@ -3,10 +3,10 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 
 const bundle = await build({ stdin: {
-  contents: "export * from './src/tracked-state'; export * from './src/session-tree';",
+  contents: "export * from './src/tracked-state'; export * from './src/session-tree'; export * from './src/compact-state';",
   resolveDir: process.cwd(),
 }, bundle: true, format: 'esm', platform: 'node', write: false });
-const { trackSessions, saveTracked, restoreTracked, markRead, readUpdates, hideSession, sessionKey, sessionTree, hasPendingSessions } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`);
+const { trackSessions, saveTracked, restoreTracked, markRead, readUpdates, hideSession, sessionKey, sessionTree, hasPendingSessions, compactEntries, compactView, mirrorCompact, trackMirrored } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`);
 const hour = 3_600_000;
 const day = 24 * hour;
 const time = 10_000;
@@ -16,6 +16,36 @@ const session = { id: 'recent', provider: 'codex', title: 'Example', preview: ''
 function snap(sessions, refreshedAt = time, status = 'ready') {
   return { sessions, refreshedAt, sources: [{ provider: 'codex', status }] };
 }
+
+test('the phone mirrors desktop exclusions, active children, read state, and list order', () => {
+  const parent = { ...session, provider: 'claude', id: 'parent', nativeId: 'local_parent' };
+  const child = { ...session, provider: 'claude', id: 'child', parentNativeId: parent.nativeId, active: true };
+  const excluded = { ...session, id: 'excluded', lastUserAt: time, recentlyActive: true, active: false };
+  const done = { ...session, read: { version: 'same', at: time }, recentlyActive: true, active: false };
+  const source = { ...snap([done, excluded, child, parent]), sources: [{ provider: 'codex', status: 'ready' }, { provider: 'claude', status: 'ready' }] };
+  const desktop = hideSession(trackSessions(new Map(), source), excluded, time);
+  const view = compactView(desktop, [parent]);
+  const payload = [...view.entries.map(({ session, ...compact }) => ({ ...session, compact })), ...view.parents];
+  const phone = trackMirrored(trackSessions(new Map(), source), payload);
+  assert.deepEqual(compactEntries(phone).map(row => row.session.id), ['child', 'recent']);
+  assert.equal(phone.get(key).readAt, time);
+  assert.deepEqual(view.parents.map(row => row.id), ['parent']);
+  assert.deepEqual(compactView(hideSession(desktop, parent, time), [parent]).parents, []);
+
+  const newInput = { ...excluded, lastUserAt: time + 1 };
+  const updated = trackSessions(desktop, { ...source, sessions: [done, newInput, child, parent], refreshedAt: time + 1 });
+  assert.ok(compactView(updated, [parent]).entries.some(row => row.session.id === 'excluded'));
+});
+
+test('pending mobile reads are sent without changing the mirrored desktop order or read state', () => {
+  const done = { ...session, active: false, read: { version: 'same' }, compact: { workAt: time } };
+  const pending = markRead(mirrorCompact([done]), key, time + 1, true);
+  assert.equal(readUpdates(trackMirrored(pending, [done]))[0].at, time + 1);
+  assert.equal(mirrorCompact([done]).get(key).readAt, undefined);
+  const changed = { ...done, read: { version: 'new' } };
+  assert.deepEqual(readUpdates(trackMirrored(pending, [changed])), []);
+  assert.equal(trackMirrored(pending, []).size, 0);
+});
 
 test('discovers active sessions and work completed between checks while ignoring past history', () => {
   const previous = trackSessions(new Map(), snap([]));

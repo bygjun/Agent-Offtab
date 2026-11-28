@@ -2,7 +2,7 @@ use crate::{
     claude_pasteboard::FilePaste,
     mobile_attachment::Attachment,
     mobile_reply::ResultCode,
-    model::{OpenResult, Session},
+    model::{ChoiceRequest, OpenResult, Provider, Session},
     targets::{self, CLAUDE_BUNDLE},
     transcript,
 };
@@ -28,6 +28,7 @@ use std::{
 };
 
 const PROMPT: &[&str] = &["Prompt", "프롬프트"];
+const NEXT_STEPS: &[&str] = &["Recommended next steps", "추천 다음 작업"];
 const SEND: &[&str] = &[
     "Send",
     "Send message",
@@ -46,6 +47,8 @@ const STOP: &[&str] = &[
     "응답 중지",
     "생성 중지",
 ];
+const V_KEY: u16 = 9;
+const COMMAND_FLAG: u64 = 1 << 20;
 const POLL: Duration = Duration::from_millis(90);
 const COMPOSER_NODES: usize = 2_000;
 static DELIVERY: Mutex<()> = Mutex::new(());
@@ -358,19 +361,53 @@ impl Composer {
             .is_some_and(|value| value == text || value.strip_suffix('\n') == Some(text))
     }
 
-    fn focus_prompt(&self) -> bool {
+    fn focus(&self, element: &Element) -> bool {
         let attribute = CFString::new("AXFocused");
         unsafe {
             AXUIElementSetAttributeValue(
-                self.prompt.0.as_CFTypeRef(),
+                element.0.as_CFTypeRef(),
                 attribute.as_concrete_TypeRef(),
                 CFBoolean::true_value().as_CFTypeRef(),
             ) == 0
         }
     }
 
+    fn focused(&self, element: &Element) -> bool {
+        self.application.related("AXFocusedUIElement").as_ref() == Some(element)
+    }
+
+    fn focus_prompt(&self) -> bool {
+        self.focus(&self.prompt)
+    }
+
     fn focused_prompt(&self) -> bool {
-        self.application.related("AXFocusedUIElement").as_ref() == Some(&self.prompt)
+        self.focused(&self.prompt)
+    }
+
+    fn activate_send_key(
+        &self,
+        id: &str,
+        button: &Element,
+        ready: impl FnOnce() -> bool,
+    ) -> Option<()> {
+        const SPACE_KEY: u16 = 49;
+        if !unsafe { CGPreflightPostEventAccess() } || !self.current(id) || !self.focus(button) {
+            return None;
+        }
+        let deadline = Instant::now() + Duration::from_millis(350);
+        while self.current(id) {
+            if self.focused(button) {
+                if ready() && self.focused(button) && self.current(id) {
+                    return post_key(self.pid, SPACE_KEY, 0);
+                }
+                return None;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(POLL);
+        }
+        None
     }
 
     fn focus_current_prompt(&self, id: &str) -> bool {
@@ -511,16 +548,16 @@ fn clear_owned_attachments(composer: &Composer, id: &str, paths: &[PathBuf]) {
     }
 }
 
-fn paste_shortcut(pid: libc::pid_t) -> Option<()> {
+fn post_key(pid: libc::pid_t, key: u16, flags: u64) -> Option<()> {
     let event = |down| {
-        let raw = unsafe { CGEventCreateKeyboardEvent(ptr::null(), 9, down) };
+        let raw = unsafe { CGEventCreateKeyboardEvent(ptr::null(), key, down) };
         (!raw.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(raw) })
     };
     let down = event(true)?;
     let up = event(false)?;
     for event in [down, up] {
         unsafe {
-            CGEventSetFlags(event.as_CFTypeRef(), 1 << 20);
+            CGEventSetFlags(event.as_CFTypeRef(), flags);
             CGEventPostToPid(pid, event.as_CFTypeRef());
         }
     }
@@ -534,6 +571,83 @@ pub fn send(
 ) -> Result<ResultCode, ResultCode> {
     let _delivery = DELIVERY.try_lock().map_err(|_| ResultCode::Busy)?;
     autoreleasepool(|_| send_in_pool(session, text, attachments))
+}
+
+pub fn answer_choice(session: &Session, choice: &ChoiceRequest, index: usize) -> ResultCode {
+    let Ok(_delivery) = DELIVERY.try_lock() else { return ResultCode::Busy };
+    autoreleasepool(|_| answer_choice_in_pool(session, choice, index).unwrap_or_else(|code| code))
+}
+
+fn answer_choice_in_pool(session: &Session, choice: &ChoiceRequest, index: usize) -> Result<ResultCode, ResultCode> {
+    if !trusted() {
+        return Err(ResultCode::DesktopPermission);
+    }
+    if !unlocked() {
+        return Err(ResultCode::DesktopLocked);
+    }
+    let id = targets::claude_desktop_id(session).ok_or(ResultCode::Unavailable)?;
+    let path = session.transcript_path.as_deref().ok_or(ResultCode::Unavailable)?;
+    let [question] = choice.questions.as_slice() else { return Err(ResultCode::Unavailable) };
+    let answer = question.options.get(index).ok_or(ResultCode::Blocked)?;
+    let mut file = File::open(path).map_err(|_| ResultCode::Unavailable)?;
+    let start = file.metadata().map_err(|_| ResultCode::Unavailable)?.len();
+    let target = targets::target(session).ok_or(ResultCode::Unavailable)?;
+    if !matches!(targets::open(&target), OpenResult::Opened) {
+        return Err(ResultCode::DesktopTarget);
+    }
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let (composer, button) = loop {
+        if !unlocked() {
+            return Err(ResultCode::DesktopLocked);
+        }
+        if let Some(composer) = Composer::find(id, deadline) {
+            if let Some(button) = choice_button(&composer, question, index, deadline) {
+                break (composer, button);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(ResultCode::DesktopTarget);
+        }
+        thread::sleep(POLL);
+    };
+    let latest = transcript::TranscriptCache::default().read(path, Provider::Claude, true)
+        .map_err(|_| ResultCode::Unavailable)?;
+    if latest.desktop_choice.as_ref() != Some(choice) || !file.metadata().is_ok_and(|meta| meta.len() == start) {
+        return Err(ResultCode::Busy);
+    }
+    if !composer.current(id) || !button.enabled() {
+        return Err(ResultCode::DesktopTarget);
+    }
+    if unsafe { AXUIElementPerformAction(button.0.as_CFTypeRef(), CFString::new("AXPress").as_concrete_TypeRef()) } != 0 {
+        return Ok(ResultCode::Unknown);
+    }
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        match transcript::claude_user_message_appended(&mut file, start, &session.id, answer, 0, &[]) {
+            Ok(true) => return Ok(ResultCode::Sent),
+            Ok(false) if Instant::now() < deadline => thread::sleep(POLL),
+            _ => return Ok(ResultCode::Unknown),
+        }
+    }
+}
+
+fn choice_button(composer: &Composer, question: &crate::model::ChoiceQuestion, index: usize, deadline: Instant) -> Option<Element> {
+    let card = find_unique(&composer.page, COMPOSER_NODES, deadline,
+        |node| node.role("AXGroup") && node.named(NEXT_STEPS), |node| node.role("AXWebArea"))?;
+    let frame = card.ancestors[0].as_ref()?;
+    let prompt = transcript::compact(&question.question, 600);
+    let _ = find_unique(frame, 60, deadline, |node| {
+        node.role("AXStaticText") && ["AXValue", "AXTitle", "AXDescription"].iter().any(|attr| {
+            node.string(attr).is_some_and(|value| transcript::compact(&value, 600) == prompt)
+        })
+    }, |node| node == &card.element)?;
+    let children: Vec<_> = card.element.children().filter(|node| node.role("AXButton")).collect();
+    if children.len() != question.options.len() || !children.iter().zip(&question.options).all(|(button, label)| {
+        button.named(&[label])
+    }) {
+        return None;
+    }
+    children.get(index).filter(|button| button.enabled()).cloned()
 }
 
 fn send_in_pool(
@@ -617,7 +731,7 @@ fn send_in_pool(
         if !composer.current(id) || !composer.focused_prompt() || !paste.unchanged() {
             return Err(ResultCode::DesktopTarget);
         }
-        paste_shortcut(composer.pid).ok_or(ResultCode::DesktopTarget)?;
+        post_key(composer.pid, V_KEY, COMMAND_FLAG).ok_or(ResultCode::DesktopTarget)?;
         let deadline = Instant::now() + Duration::from_secs(4);
         loop {
             if let Some(fresh) = Composer::find(id, deadline).filter(|fresh| {
@@ -679,7 +793,7 @@ fn send_in_pool(
     let same_log = transcript_file
         .metadata()
         .is_ok_and(|meta| meta.len() == start);
-    let Some((_, button)) = destination.filter(|(fresh, button)| {
+    let Some((fresh, button)) = destination.filter(|(fresh, button)| {
         same_log
             && button.enabled()
             && fresh.current(id)
@@ -703,12 +817,27 @@ fn send_in_pool(
             ResultCode::DesktopTarget
         });
     };
-    // An error from AXPress may occur after Claude accepted the click. Do not retry it.
-    unsafe {
-        AXUIElementPerformAction(
-            button.0.as_CFTypeRef(),
-            CFString::new("AXPress").as_concrete_TypeRef(),
-        );
+    let ready = || {
+        button.enabled()
+            && fresh.contains_draft(text)
+            && fresh.has_attachments(&paths, Instant::now() + Duration::from_millis(500))
+            && transcript_file
+                .metadata()
+                .is_ok_and(|meta| meta.len() == start)
+            && fresh.current(id)
+    };
+    // Fall back only when no key event was posted. A slow or failed confirmation
+    // can still mean Claude received the first submission.
+    if fresh.activate_send_key(id, &button, &ready).is_none() {
+        if !ready() {
+            return Err(ResultCode::DesktopTarget);
+        }
+        unsafe {
+            AXUIElementPerformAction(
+                button.0.as_CFTypeRef(),
+                CFString::new("AXPress").as_concrete_TypeRef(),
+            );
+        }
     }
     let deadline =
         Instant::now() + Duration::from_secs(if expected_files.is_empty() { 3 } else { 7 });

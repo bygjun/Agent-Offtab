@@ -34,17 +34,41 @@ pub(super) struct DeviceStore {
 #[cfg(target_os = "macos")]
 const SERVICE: &str = "Offtab mobile pairing";
 
+#[cfg(target_os = "macos")]
+fn read_keychain(account: &str) -> Result<Option<Vec<u8>>, ()> {
+    if crate::pairing_keychain::enabled() {
+        return match crate::pairing_keychain::request(account, None).map_err(|_| ())? {
+            (0, Some(bytes)) => Ok(Some(bytes)),
+            (-25300, _) => Ok(None), // errSecItemNotFound
+            _ => Err(()),
+        };
+    }
+    match security_framework::passwords::get_generic_password(SERVICE, account) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.code() == -25300 => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn write_keychain(account: &str, data: &[u8]) -> Result<(), ()> {
+    if crate::pairing_keychain::enabled() {
+        return (crate::pairing_keychain::request(account, Some(data)).map_err(|_| ())?.0 == 0)
+            .then_some(())
+            .ok_or(());
+    }
+    security_framework::passwords::set_generic_password(SERVICE, account, data).map_err(|_| ())
+}
+
 impl DeviceStore {
     pub fn load(account: String) -> Result<Self, String> {
         #[cfg(target_os = "macos")]
         {
-            let devices =
-                match security_framework::passwords::get_generic_password(SERVICE, &account) {
-                    Ok(bytes) => serde_json::from_slice(&bytes)
-                        .map_err(|_| "키체인에 저장된 휴대폰 정보를 읽을 수 없습니다.")?,
-                    Err(error) if error.code() == -25300 => Vec::new(), // errSecItemNotFound
-                    Err(_) => return Err("macOS 키체인에 접근할 수 없습니다.".into()),
-                };
+            let devices = match read_keychain(&account).map_err(|_| "macOS 키체인에 접근할 수 없습니다.")? {
+                Some(bytes) => serde_json::from_slice(&bytes)
+                    .map_err(|_| "키체인에 저장된 휴대폰 정보를 읽을 수 없습니다.")?,
+                None => Vec::new(),
+            };
             Ok(Self {
                 account: Some(account),
                 devices: Arc::new(Mutex::new(devices)),
@@ -84,12 +108,7 @@ impl DeviceStore {
         }
         if let Some(account) = &self.account {
             #[cfg(target_os = "macos")]
-            security_framework::passwords::set_generic_password(
-                SERVICE,
-                account,
-                &serde_json::to_vec(&updated).map_err(|_| ())?,
-            )
-            .map_err(|_| ())?;
+            write_keychain(account, &serde_json::to_vec(&updated).map_err(|_| ())?)?;
             #[cfg(not(target_os = "macos"))]
             {
                 let _ = account;

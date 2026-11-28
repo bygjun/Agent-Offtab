@@ -68,7 +68,9 @@ button:disabled { cursor: default; }
 ::selection { background: var(--accent); color: #192212; }
 .mobile-compact > .notice { margin-inline: 15px; }
 .row-actions .reply-link { color: var(--accent); }
-html:has(.reply-dialog[open]) { overflow: hidden; }
+html:has(.reply-dialog[open]) { overflow: hidden; overscroll-behavior: none; }
+html:has(.reply-dialog[open]) body { position: fixed; inset: var(--offtab-page-top, 0) 0 auto; width: 100%; }
+.reply-dialog::backdrop { background: #171819; }
 .reply-dialog {
   --reply-gutter: max(16px, calc((100% - 44rem) / 2));
   position: fixed;
@@ -115,8 +117,8 @@ html:has(.reply-dialog[open]) { overflow: hidden; }
 }
 .reply-header button:enabled:hover { background: #343537; }
 .reply-header svg { width: 18px; height: 18px; }
-.reply-answer { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-block: 14px 22px; }
-.reply-answer > h3 { margin: 0 0 9px; font-size: 12px; color: var(--muted); font-weight: 600; }
+.reply-header > .provider-logo { flex: none; }
+.reply-answer { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; padding-block: 12px 14px; }
 .reply-answer > p { font-size: 13px; line-height: 1.55; color: var(--muted); overflow-wrap: anywhere; }
 .reply-answer .reply-content { white-space: pre-wrap; color: #efeeea; font-size: 16px; }
 .reply-answer .reply-bubble {
@@ -129,6 +131,12 @@ html:has(.reply-dialog[open]) { overflow: hidden; }
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
+.reply-bubble:has(.message-attachments) { min-width: 0; }
+.message-attachments { display: grid; gap: 5px; padding: 0; margin: 0; list-style: none; }
+.reply-content + .message-attachments { margin-top: 8px; }
+.message-attachments li { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 13px; color: #d6d8d1; }
+.message-attachments li span { overflow-wrap: anywhere; }
+.message-attachments svg, .message-delivery svg, .conversation-responding svg { width: 14px; height: 14px; flex: none; }
 .reply-answer :is(.reply-content, .answer-markdown) + p { margin-top: 8px; }
 @keyframes answer-type { from { opacity: 0; } to { opacity: 1; } }
 .answer-typing-fragment { animation: answer-type 1ms step-end backwards; }
@@ -144,7 +152,8 @@ html:has(.reply-dialog[open]) { overflow: hidden; }
 .answer-markdown :is(h1, h2) { font-size: 1.25em; }
 .answer-markdown :is(h3, h4, h5, h6) { font-size: 1.06em; }
 .answer-markdown a { color: #9cc2ff; text-underline-offset: .16em; }
-.answer-markdown .markdown-reference { color: #a9bddd; }
+.answer-markdown .markdown-reference { color: var(--muted); }
+.markdown-reference svg { width: .9em; height: .9em; margin-inline-end: .3em; vertical-align: -.12em; }
 .answer-markdown blockquote { margin-inline: 0; padding-inline-start: 12px; border-inline-start: 2px solid #575b5d; color: #c6c7c2; }
 .answer-markdown code { font: .88em/1.5 ui-monospace, Menlo, monospace; }
 .answer-markdown :not(pre) > code { padding: 1px 4px; border-radius: 4px; background: #2a2c2d; }
@@ -162,6 +171,7 @@ html:has(.reply-dialog[open]) { overflow: hidden; }
   border-top: 1px solid var(--rule);
   background: #202222;
 }
+.reply-dialog[data-keyboard] .reply-form { padding-bottom: 8px; }
 .reply-compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; }
 .reply-form textarea {
   width: 100%;
@@ -178,7 +188,7 @@ html:has(.reply-dialog[open]) { overflow: hidden; }
   background: #171819;
   color: inherit;
 }
-.reply-form textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.reply-form textarea:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .reply-compose button {
   min-height: 44px;
   padding: 0 12px;
@@ -208,17 +218,40 @@ html:has(.reply-dialog[open]) { overflow: hidden; }
 .mobile-list-tools { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--rule); }
 .mobile-list-tools input { min-width: 0; flex: 1; min-height: 36px; padding: 5px 8px; color: inherit; background: #212223; border: 1px solid var(--rule); border-radius: 5px; font-size: 16px; }
 .mobile-list-tools time { color: var(--muted); font-size: 11px; }
-.mobile-hidden-tools { padding: 0 12px; }
-.mobile-hidden-tools ul { padding: 0; list-style: none; }
-.mobile-hidden-tools li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-left: 8px; font-size: 12px; }
-.mobile-hidden-tools button, .mobile-compact .notice button, .conversation-actions button {
+.conversation-actions button {
   min-height: 40px; padding-inline: 8px; color: var(--accent); background: transparent; border: 0;
 }
 .conversation-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .conversation-actions button:disabled { color: var(--muted); }
-.conversation-turns { display: grid; gap: 24px; list-style: none; padding: 0; margin: 12px 0 16px; }
+.conversation-turns { display: grid; gap: 14px; flex: none; list-style: none; padding: 0; margin: auto 0 0; }
 .conversation-turns > li { min-width: 0; }
 .conversation-turns > li > small { display: block; color: var(--muted); margin-top: 6px; }
 .conversation-turns > li[data-role='user'] > small { text-align: end; }
-.reply-upload { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
-.reply-upload progress { flex: 1; accent-color: var(--accent); }
+.conversation-turns > li > .message-delivery { display: flex; justify-content: flex-end; align-items: center; gap: 5px; font-size: 12px; }
+.message-status-dismiss { display: block; margin-inline-start: auto; min-height: 44px; border: 0; background: transparent; color: var(--muted); font-size: 12px; }
+.conversation-fetch, .conversation-responding { color: var(--muted); font-size: 13px; }
+.conversation-responding { display: flex; align-items: center; gap: 6px; min-height: 24px; }
+.conversation-waiting { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--rule); border-radius: 8px; background: #212223; overflow-wrap: anywhere; }
+.conversation-waiting p { margin: 0; font-size: 14px; line-height: 1.5; }
+.conversation-waiting .conversation-waiting-label { color: #f3b982; font-size: 12px; font-weight: 650; }
+.conversation-waiting .conversation-waiting-note { color: var(--muted); }
+.conversation-waiting ul { margin: 5px 0 0; padding-inline-start: 20px; font-size: 14px; line-height: 1.5; }
+.conversation-waiting .conversation-choice-list { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; list-style: none; }
+.conversation-choice-list button, .conversation-choice-submit { min-height: 44px; padding: 6px 10px; border: 1px solid var(--rule); border-radius: 6px; color: inherit; background: #292b2b; font-size: 14px; }
+.conversation-choice-list button[aria-pressed='true'], .conversation-choice-submit:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.conversation-choice-list button:disabled, .conversation-choice-submit:disabled { color: var(--muted); }
+.reply-form .choice-receipt-dismiss { min-height: 34px; border: 0; background: none; color: inherit; text-decoration: underline; }
+.conversation-responding svg, .message-delivery svg { animation: compact-spin .95s linear infinite; }
+.conversation-turns > li > .message-delivery[data-error='true'], .reply-form .reply-error { color: #f3b982; }
+.conversation-latest {
+  position: absolute; z-index: 1; grid-row: 2; bottom: 8px; justify-self: center;
+  display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px;
+  border: 1px solid #575950; border-radius: 7px; background: #262923; color: var(--accent); font-size: 13px;
+}
+.conversation-latest svg { width: 15px; height: 15px; }
+.mobile-compact .compact-status[data-state='running'] .status-dot { display: none; }
+.mobile-compact .compact-status[data-state='running']:not([data-background]) { color: var(--muted); }
+.mobile-compact .compact-status[data-state='done'] .status-dot { height: 7px; width: 7px; }
+@media (prefers-reduced-motion: reduce) {
+  .conversation-responding svg, .message-delivery svg { animation: none; }
+}

@@ -111,6 +111,61 @@ fn codex_new_live_and_short_turns_are_found_while_old_rows_stay_hidden() {
 }
 
 #[test]
+fn codex_shares_only_the_current_unanswered_question() {
+    use std::io::Write;
+
+    let dir = Fixture::new("codex-waiting-choice");
+    let db = Connection::open(dir.0.join("state_1.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE threads (id TEXT, title TEXT, cwd TEXT, rollout_path TEXT,
+        updated_at INTEGER, archived INTEGER DEFAULT 0, source TEXT DEFAULT 'appServer')",
+    )
+    .unwrap();
+    let path = dir.0.join(format!("rollout-{RUNNING}.jsonl"));
+    db.execute(
+        "INSERT INTO threads (id, title, cwd, rollout_path, updated_at) VALUES (?1, ?1, '/test', ?2, ?3)",
+        rusqlite::params![RUNNING, path.to_str().unwrap(), NOW / 1000],
+    )
+    .unwrap();
+    let mut file = fs::File::create(&path).unwrap();
+    let open_logs = HashSet::from([path]);
+    let mut collector = Collector::default();
+    let mut row = || {
+        collector
+            .codex(&dir.0, &compact_scope(&[]), Some(&open_logs), &mut false)
+            .unwrap()
+            .1
+            .remove(0)
+    };
+    let start = |at| json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_started"}});
+    let call = |id, at, arguments| json!({"type":"response_item","timestamp":at,"payload":{
+        "type":"function_call","name":"request_user_input","call_id":id,"arguments":arguments
+    }});
+    let answer = |id, at| json!({"type":"response_item","timestamp":at,"payload":{
+        "type":"function_call_output","call_id":id,"output":"{}"
+    }});
+    let arguments = json!({"questions":[{"id":"direction", "header":"방향", "question":"어느 안으로 진행할까요?",
+        "options":[{"label":"A","description":"첫째"},{"label":"B","description":"둘째"}]}]});
+    writeln!(file, "{}\n{}\n{}", start(NOW - 1_000),
+        call("first", NOW - 700, json!(arguments.to_string())), answer("other", NOW - 600)).unwrap();
+    let pending = row();
+    assert_eq!(pending.waiting, Some(Waiting::Input));
+    let detail = &pending.waiting_details.unwrap().questions[0];
+    assert_eq!(detail.question, "어느 안으로 진행할까요?");
+    assert_eq!(detail.options, ["A", "B"]);
+
+    writeln!(file, "{}", answer("first", NOW - 500)).unwrap();
+    let answered = row();
+    assert!(answered.waiting.is_none() && answered.waiting_details.is_none());
+
+    writeln!(file, "{}", call("next", NOW - 400, arguments)).unwrap();
+    assert!(row().waiting_details.is_some());
+    writeln!(file, "{}", start(NOW - 300)).unwrap();
+    let next_turn = row();
+    assert!(next_turn.waiting.is_none() && next_turn.waiting_details.is_none());
+}
+
+#[test]
 fn claude_busy_pid_and_completed_message_are_found_but_pid_reuse_is_ignored() {
     let dir = Fixture::new("claude");
     let project = dir.0.join("projects/sample");
@@ -397,6 +452,9 @@ fn claude_desktop_detects_a_rendered_choice_with_a_summary_only_in_metadata() {
     assert_eq!(pending[0].active, Some(false));
     assert_eq!(pending[0].waiting, Some(Waiting::Input));
     assert_eq!(pending[0].waiting_at, Some(turn_end));
+    let detail = &pending[0].waiting_details.as_ref().unwrap().questions[0];
+    assert_eq!(detail.question, "어느 안으로 진행할까요?");
+    assert_eq!(detail.options, ["A", "B"]);
 
     write_transcript(&card("second", false, turn_end - 2_000));
     assert_eq!(
@@ -404,6 +462,7 @@ fn claude_desktop_detects_a_rendered_choice_with_a_summary_only_in_metadata() {
         None,
         "a newer call that renders no card supersedes the old one"
     );
+    assert!(rows(&mut collector)[0].waiting_details.is_none());
     write_transcript(&[]);
     data["latestUserFrameAt"] = json!(turn_end + 1);
     fs::write(&metadata, data.to_string()).unwrap();

@@ -3,8 +3,8 @@ use crate::{
     mobile_devices::{DeviceStore, SavedDevice, SavedSend},
     mobile_reply::{Dispatcher, ResultCode},
     model::{
-        is_uuid, ListScope, Mode, Provider, Role, Session, SessionId, Snapshot, Source, Waiting,
-        Watched,
+        is_uuid, ChoiceRequest, CompactPosition, CompactView, ListScope, Mode, Provider, Role, Session, SessionId,
+        Snapshot, Source, Waiting, Watched,
     },
     session_reads::{has_source_rows, read_version, ReadStatus, ReadStore, ReadUpdate, READ_BATCH},
     transcript::epoch,
@@ -17,9 +17,9 @@ use reqwest::{blocking::Client, redirect, StatusCode, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::{BufReader, Read},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime},
@@ -106,6 +106,13 @@ struct Reply {
     kind: ReplyKind,
     #[serde(default)]
     history_limit: usize,
+    choice: Option<ChoiceSubmission>,
+}
+
+#[derive(Deserialize)]
+struct ChoiceSubmission {
+    token: String,
+    answers: Vec<usize>,
 }
 
 #[derive(Default, Deserialize)]
@@ -121,7 +128,37 @@ struct ContextSelection {
     target: String,
     expires: Instant,
     limit: usize,
-    cached: Option<(i64, Result<Vec<crate::transcript::VisibleTurn>, ()>)>,
+    transcript: PathBuf,
+    cached: Option<(
+        Option<TranscriptStamp>,
+        Result<Vec<crate::transcript::VisibleTurn>, ()>,
+    )>,
+}
+
+#[derive(PartialEq)]
+struct TranscriptStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl TranscriptStamp {
+    fn read(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+}
+
+impl ContextSelection {
+    fn transcript_changed(&self) -> bool {
+        Instant::now() < self.expires
+            && self
+                .cached
+                .as_ref()
+                .is_some_and(|(stamp, _)| *stamp != TranscriptStamp::read(&self.transcript))
+    }
 }
 
 #[derive(Serialize)]
@@ -285,7 +322,10 @@ pub struct Mobile {
     store: Option<DeviceStore>,
     startup_error: Option<String>,
     reads: ReadStore,
+    desktop_compact: Option<DesktopCompact>,
 }
+
+pub type DesktopCompact = Arc<Mutex<Option<Arc<CompactView>>>>;
 
 #[derive(Clone, Copy)]
 pub enum ReplyTargets<'a> {
@@ -294,9 +334,10 @@ pub enum ReplyTargets<'a> {
 }
 
 impl Mobile {
-    pub fn with_reads(reads: ReadStore) -> Self {
+    pub fn with_compact(reads: ReadStore, desktop_compact: DesktopCompact) -> Self {
         Self {
             reads,
+            desktop_compact: Some(desktop_compact),
             ..Self::default()
         }
     }
@@ -378,10 +419,12 @@ impl Mobile {
                 let store = store.clone();
                 let dispatcher = dispatcher.clone();
                 let reads = self.reads.clone();
+                let desktop_compact = self.desktop_compact.clone();
                 let mut collect = collect.clone();
                 thread::spawn(move || {
                     let mut bridge =
                         Bridge::new(&relay, &status, Some(store), salt, dispatcher, reads);
+                    bridge.desktop_compact = desktop_compact;
                     bridge.channel = Some(Channel::from_keys(saved.keys));
                     bridge.decision = Some((saved.accepted_request, true));
                     let now = epoch(SystemTime::now());
@@ -579,8 +622,10 @@ impl Mobile {
             let relay = Arc::clone(&relay);
             let status = Arc::clone(&status);
             let reads = self.reads.clone();
+            let desktop_compact = self.desktop_compact.clone();
             thread::spawn(move || {
                 let mut bridge = Bridge::new(&relay, &status, Some(store), salt, dispatcher, reads);
+                bridge.desktop_compact = desktop_compact;
                 bridge.secret = Some(secret);
                 bridge.deadline = Some(Instant::now() + PAIR_WINDOW);
                 bridge.run(stopped, collect);
@@ -687,6 +732,8 @@ struct Bridge<'a> {
     receipts: VecDeque<Receipt>,
     context: Option<ContextSelection>,
     watched: Vec<Watched>,
+    desktop_compact: Option<DesktopCompact>,
+    last_compact: Option<Arc<CompactView>>,
     waiting_sessions: Option<HashMap<String, (Waiting, i64)>>,
 }
 
@@ -718,6 +765,8 @@ impl<'a> Bridge<'a> {
             receipts: VecDeque::new(),
             context: None,
             watched: Vec::new(),
+            desktop_compact: None,
+            last_compact: None,
             waiting_sessions: None,
         }
     }
@@ -838,6 +887,19 @@ impl<'a> Bridge<'a> {
                 self.pin = None;
                 self.deadline = None;
                 self.show(Phase::Paired, None, false);
+                let compact = if let Some(desktop) = &self.desktop_compact {
+                    let Some(view) = desktop.lock().map_err(|_| ())?.clone() else {
+                        return Ok(Some(REQUEST_POLL));
+                    };
+                    Some(view)
+                } else {
+                    None
+                };
+                let compact_changed = compact.as_ref().is_some_and(|view| {
+                    self.last_compact
+                        .as_ref()
+                        .is_none_or(|previous| !Arc::ptr_eq(view, previous))
+                });
                 let finished = self.check_job();
                 let interval = if self.reply_job.is_some() {
                     REPLY_POLL
@@ -847,13 +909,33 @@ impl<'a> Bridge<'a> {
                 let due = self
                     .last_published
                     .is_none_or(|last| last.elapsed() >= interval);
+                let detail_changed = self
+                    .last_published
+                    .is_some_and(|last| last.elapsed() >= REPLY_POLL)
+                    && self
+                        .context
+                        .as_ref()
+                        .is_some_and(ContextSelection::transcript_changed);
                 if state.reply.is_some()
                     || state.context.is_some()
                     || state.read.is_some()
                     || finished
                     || due
+                    || detail_changed
+                    || compact_changed
                 {
-                    let mut snapshot = collect(&self.watched).map_err(|_| ())?;
+                    let watched = compact.as_deref().map(compact_watched);
+                    let mut snapshot =
+                        collect(watched.as_deref().unwrap_or(&self.watched)).map_err(|_| ())?;
+                    if let Some(view) = compact.as_deref() {
+                        let allowed: HashSet<_> = view
+                            .rows()
+                            .map(|(session, _)| session_identity(session))
+                            .collect();
+                        snapshot
+                            .sessions
+                            .retain(|session| allowed.contains(&session_identity(session)));
+                    }
                     if let Some(reply) = state.reply {
                         self.handle_reply(reply, &snapshot, false);
                     }
@@ -864,7 +946,8 @@ impl<'a> Bridge<'a> {
                         self.handle_read(read, &snapshot)?;
                     }
                     self.reads.apply(&mut snapshot);
-                    self.publish(snapshot)?;
+                    self.publish(snapshot, compact.as_deref())?;
+                    self.last_compact = compact;
                     self.last_published = Some(Instant::now());
                 }
                 self.show(Phase::Paired, None, false);
@@ -1012,7 +1095,7 @@ impl<'a> Bridge<'a> {
                 && request.sent_at <= now.saturating_add(5_000)
                 && now.saturating_sub(request.sent_at) < REPLY_WINDOW_MS
             {
-                let sessions = shared_rows(snapshot);
+                let sessions = self.available_rows(snapshot);
                 let updates = request
                     .reads
                     .into_iter()
@@ -1080,6 +1163,9 @@ impl<'a> Bridge<'a> {
             let Ok(status) = self.status.lock() else {
                 return ResultCode::Blocked;
             };
+            if status.phase != Phase::Paired || !status.reply_enabled {
+                return ResultCode::Blocked;
+            }
             let (Some(expected), Some(provided)) =
                 (status.permit.as_ref(), request.permit.as_ref())
             else {
@@ -1089,21 +1175,23 @@ impl<'a> Bridge<'a> {
                 return ResultCode::Blocked;
             }
         }
-        let Some(target) = shared_rows(snapshot)
+        let Some(target) = self
+            .available_rows(snapshot)
             .into_iter()
             .find(|session| opaque_session_id(&self.salt, session) == request.target)
         else {
             return ResultCode::Unavailable;
         };
         if matches!(request.kind, ReplyKind::Context) {
-            if answer_path(target).is_none() {
+            let Some(transcript) = answer_path(target) else {
                 return ResultCode::Unavailable;
-            }
+            };
             self.context = Some(ContextSelection {
                 id: request.id,
                 target: request.target,
                 expires: Instant::now() + CONTEXT_WINDOW,
                 limit: request.history_limit.min(10),
+                transcript: transcript.to_owned(),
                 cached: None,
             });
             return ResultCode::Context;
@@ -1112,17 +1200,29 @@ impl<'a> Bridge<'a> {
             return ResultCode::Busy;
         }
         let text = request.text.trim();
-        if (text.is_empty() && request.attachment.is_none() && request.attachments.is_empty())
+        let selection = if let Some(input) = &request.choice {
+            let Some((token, card)) = choice_token(&self.salt, target) else { return ResultCode::Busy };
+            if input.token != token {
+                return ResultCode::Busy;
+            }
+            if !text.is_empty() || request.attachment.is_some() || !request.attachments.is_empty()
+                || input.answers.len() != card.questions.len()
+                || card.questions.iter().zip(&input.answers).any(|(question, &index)| index >= question.options.len()) {
+                return ResultCode::Blocked;
+            }
+            Some((card, input.answers.as_slice()))
+        } else { None };
+        if selection.is_none() && ((text.is_empty() && request.attachment.is_none() && request.attachments.is_empty())
             || text.starts_with(['/', '!'])
             || text.chars().count() > MAX_REPLY_CHARS
             || text
                 .chars()
-                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')))
         {
             return ResultCode::Blocked;
         }
 
-        if target.updated_at != request.updated_at
+        if (selection.is_none() && target.updated_at != request.updated_at)
             || !snapshot.sources.iter().any(|source| {
                 source.provider == target.provider
                     && matches!(source.status, crate::model::SourceStatus::Ready)
@@ -1163,14 +1263,17 @@ impl<'a> Bridge<'a> {
                 return ResultCode::Blocked;
             }
             // Linearize dispatch against changes to the permission.
-            let result = self.dispatch_result(target, text, attachments, &request.id);
+            if status.phase != Phase::Paired || !status.reply_enabled || status.permit != request.permit {
+                return ResultCode::Blocked;
+            }
+            let result = self.dispatch_result(target, text, attachments, &request.id, selection);
             drop(status);
             if result != ResultCode::Processing {
                 self.save_reply_outcome(&request.id, result);
             }
             return result;
         }
-        self.dispatch_result(target, text, attachments, &request.id)
+        self.dispatch_result(target, text, attachments, &request.id, selection)
     }
 
     fn dispatch_result(
@@ -1179,7 +1282,11 @@ impl<'a> Bridge<'a> {
         text: &str,
         attachments: Vec<crate::mobile_attachment::Attachment>,
         id: &str,
+        selection: Option<(&ChoiceRequest, &[usize])>,
     ) -> ResultCode {
+        if let Some((card, selected)) = selection {
+            return self.dispatcher.answer_choice(target, card, selected);
+        }
         match self.dispatcher.dispatch(target, id, text, attachments) {
             Ok(result) => {
                 self.reply_job = Some((id.into(), result));
@@ -1189,9 +1296,17 @@ impl<'a> Bridge<'a> {
         }
     }
 
-    fn publish(&mut self, snapshot: Snapshot) -> Result<(), ()> {
+    fn available_rows<'s>(&self, snapshot: &'s Snapshot) -> Vec<&'s Session> {
+        if self.desktop_compact.is_some() {
+            snapshot.sessions.iter().collect()
+        } else {
+            shared_rows(snapshot)
+        }
+    }
+
+    fn publish(&mut self, snapshot: Snapshot, compact: Option<&CompactView>) -> Result<(), ()> {
         let channel = self.channel.as_ref().ok_or(())?;
-        let sessions = shared_rows(&snapshot);
+        let sessions = self.available_rows(&snapshot);
         let status = self.status.lock().map_err(|_| ())?.clone();
         let next_watched = sessions
             .iter()
@@ -1230,18 +1345,23 @@ impl<'a> Bridge<'a> {
                     .find(|session| opaque_session_id(&self.salt, session) == context.target)
                     .and_then(|session| answer_path(session).map(|path| (session, path)));
                 if let Some((session, path)) = target {
-                    if context
-                        .cached
-                        .as_ref()
-                        .is_none_or(|(updated_at, _)| *updated_at != session.updated_at)
+                    let stamp = TranscriptStamp::read(path);
+                    if path != context.transcript
+                        || context
+                            .cached
+                            .as_ref()
+                            .is_none_or(|(cached, _)| *cached != stamp)
                     {
                         let answer = if context.limit == 0 {
                             crate::transcript::last_assistant(path, session.provider).map(|text| {
                                 text.into_iter()
                                     .map(|text| crate::transcript::VisibleTurn {
+                                        id: String::new(),
+                                        at: None,
                                         role: Role::Assistant,
                                         text,
                                         truncated: false,
+                                        attachments: Vec::new(),
                                     })
                                     .collect()
                             })
@@ -1253,7 +1373,8 @@ impl<'a> Bridge<'a> {
                             )
                         }
                         .map_err(|_| ());
-                        context.cached = Some((session.updated_at, answer));
+                        context.transcript = path.to_owned();
+                        context.cached = Some((stamp, answer));
                     }
                 }
                 let answer = target
@@ -1295,18 +1416,45 @@ impl<'a> Bridge<'a> {
             })
         });
         let desktop_access = crate::mobile_reply::claude_desktop_access();
-        let rows = sessions
-            .into_iter()
-            .map(|session| {
-                let reason = self.dispatcher.unavailable_reason(session, desktop_access);
-                Preview::from_session(
-                    session,
-                    &self.salt,
-                    status.reply_enabled && reason.is_none(),
-                    reason,
-                )
-            })
-            .collect();
+        let preview = |display: &Session, position, target: Option<&Session>| {
+            let reason = target.map_or(
+                Some(crate::mobile_reply::UnavailableReason::Unavailable),
+                |target| self.dispatcher.unavailable_reason(target, desktop_access),
+            );
+            let mut row = Preview::from_session(
+                display,
+                &self.salt,
+                status.reply_enabled && reason.is_none(),
+                reason,
+            );
+            row.compact = position;
+            row.can_read_answer = target.and_then(answer_path).is_some();
+            let current = target.filter(|target| target.waiting == display.waiting && target.waiting_at == display.waiting_at);
+            row.waiting_details = current.and_then(|target| target.waiting_details.clone());
+            row.choice_token = current.filter(|target| status.reply_enabled && self.dispatcher.can_answer_choice(target, desktop_access))
+                .and_then(|target| choice_token(&self.salt, target).map(|(token, _)| token));
+            row
+        };
+        let rows = if let Some(view) = compact {
+            let current: HashMap<_, _> = sessions
+                .iter()
+                .map(|&session| (session_identity(session), session))
+                .collect();
+            view.rows()
+                .map(|(session, position)| {
+                    preview(
+                        session,
+                        position,
+                        current.get(&session_identity(session)).copied(),
+                    )
+                })
+                .collect()
+        } else {
+            sessions
+                .into_iter()
+                .map(|session| preview(session, None, Some(session)))
+                .collect()
+        };
         let partial = snapshot.sources.iter().any(|source| {
             matches!(
                 source.status,
@@ -1315,6 +1463,7 @@ impl<'a> Bridge<'a> {
         });
         let payload = serde_json::to_vec(&MobileSnapshot {
             sessions: rows,
+            desktop_compact: compact.is_some(),
             refreshed_at: snapshot.refreshed_at,
             partial,
             sources: &snapshot.sources,
@@ -1367,6 +1516,25 @@ fn shared_rows(snapshot: &Snapshot) -> Vec<&Session> {
     });
     sessions.truncate(MAX_ROWS);
     sessions
+}
+
+fn session_identity(session: &Session) -> (Provider, &str) {
+    (
+        session.provider,
+        session.native_id.as_deref().unwrap_or(&session.id),
+    )
+}
+
+fn compact_watched(view: &CompactView) -> Vec<Watched> {
+    view.rows()
+        .map(|(session, _)| Watched {
+            provider: session.provider,
+            id: session.id.clone(),
+            native_id: session.native_id.clone(),
+            has_transcript: session.has_transcript,
+            hidden_at: None,
+        })
+        .collect()
 }
 
 fn open_reply(cipher: &Aes256Gcm, sealed: &str) -> Option<Reply> {
@@ -1484,6 +1652,15 @@ fn opaque_session_id(salt: &[u8], session: &Session) -> String {
     )
 }
 
+fn choice_token<'a>(salt: &[u8], session: &'a Session) -> Option<(String, &'a ChoiceRequest)> {
+    if session.waiting != Some(Waiting::Input) { return None; }
+    let waiting_at = session.waiting_at?;
+    let choice = session.waiting_details.as_ref()?.choice.as_ref()?;
+    let body = serde_json::to_string(choice).ok()?;
+    let token = opaque_id(salt, session.provider, &format!("{}:choice:{waiting_at}:{body}", session.id));
+    Some((token, choice))
+}
+
 fn excerpt(value: &str, limit: usize) -> String {
     // Keep the relay payload bounded even for long Unicode text or control characters.
     value
@@ -1509,6 +1686,10 @@ struct Preview {
     background: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     waiting_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waiting_details: Option<crate::model::WaitingDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    choice_token: Option<String>,
     activity_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_user_at: Option<i64>,
@@ -1523,6 +1704,8 @@ struct Preview {
     can_attach: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reply_unavailable: Option<crate::mobile_reply::UnavailableReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compact: Option<CompactPosition>,
 }
 
 impl Preview {
@@ -1538,7 +1721,7 @@ impl Preview {
             id: opaque_session_id(salt, session),
             parent_native_id: session.parent_native_id.as_deref().map(id),
             title: excerpt(&session.title, 120),
-            preview: excerpt(&session.preview, 220),
+            preview: excerpt(&session.preview, 420),
             role: session.role,
             cwd: excerpt(
                 Path::new(&session.cwd)
@@ -1552,6 +1735,8 @@ impl Preview {
             active: session.active,
             background: session.background,
             waiting_at: session.waiting_at,
+            waiting_details: session.waiting_details.clone(),
+            choice_token: None,
             activity_at: session.activity_at,
             last_user_at: session.last_user_at,
             recently_active: session.recently_active,
@@ -1561,6 +1746,7 @@ impl Preview {
             can_read_answer: answer_path(session).is_some(),
             can_attach: can_reply,
             reply_unavailable,
+            compact: None,
         }
     }
 }
@@ -1569,6 +1755,8 @@ impl Preview {
 #[serde(rename_all = "camelCase")]
 struct MobileSnapshot<'a> {
     sessions: Vec<Preview>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    desktop_compact: bool,
     refreshed_at: i64,
     partial: bool,
     sources: &'a [Source],
@@ -1644,6 +1832,7 @@ mod tests {
             store: Some(store.clone()),
             startup_error: None,
             reads: ReadStore::default(),
+            desktop_compact: None,
         };
         let status = mobile
             .allow_reply(ReplyTargets::Device("one"), true)
@@ -1685,6 +1874,7 @@ mod tests {
             active: Some(false),
             waiting: None,
             waiting_at: None,
+            waiting_details: None,
             background: 0,
             recently_active: false,
             activity_at: 0,
@@ -1738,6 +1928,8 @@ mod tests {
             receipts: VecDeque::new(),
             context: None,
             watched: Vec::new(),
+            desktop_compact: None,
+            last_compact: None,
             waiting_sessions: None,
         };
         let mut target = sample_session("target", "/example");
@@ -2002,15 +2194,38 @@ mod tests {
                 }
             }
         });
-        let mut restored = Mobile::default();
+        let view = CompactView {
+            entries: vec![crate::model::CompactEntry {
+                session: sample_session("visible", "/example/visible"),
+                position: CompactPosition {
+                    work_at: 121,
+                    read_at: Some(122),
+                },
+            }],
+            parents: vec![],
+        };
+        let mut restored = Mobile::with_compact(
+            ReadStore::default(),
+            Arc::new(Mutex::new(Some(Arc::new(view)))),
+        );
         restored
             .restore_from_store(
                 origin,
                 store,
                 Dispatcher::new(Path::new("/example")),
-                |_| {
+                |watched| {
+                    assert_eq!(
+                        watched
+                            .iter()
+                            .map(|item| item.id.as_str())
+                            .collect::<Vec<_>>(),
+                        ["visible"]
+                    );
                     Ok(Snapshot {
-                        sessions: vec![],
+                        sessions: vec![
+                            sample_session("excluded", "/example/excluded"),
+                            sample_session("visible", "/example/visible"),
+                        ],
                         sources: vec![],
                         removed: vec![],
                         refreshed_at: 123,
@@ -2020,6 +2235,13 @@ mod tests {
             .unwrap();
         let snapshot = received.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(snapshot["refreshedAt"], 123);
+        assert_eq!(snapshot["desktopCompact"], true);
+        assert_eq!(snapshot["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["sessions"][0]["cwd"], "visible");
+        assert_eq!(
+            snapshot["sessions"][0]["compact"],
+            serde_json::json!({ "workAt": 121, "readAt": 122 })
+        );
         assert_eq!(snapshot["permit"], permit);
         assert_eq!(snapshot["deviceLabel"], "Test phone");
         assert_eq!(
@@ -2110,6 +2332,7 @@ mod tests {
             store: Some(store.clone()),
             startup_error: None,
             reads: ReadStore::default(),
+            desktop_compact: None,
         };
         let status = mobile.stop(&id).unwrap();
         assert!(status[0].phase == Phase::Revoking && !status[0].reply_enabled);

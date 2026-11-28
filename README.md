@@ -6,7 +6,7 @@ Codex와 Claude Code 채팅을 화면 한쪽에 띄워두는 Mac 앱입니다. �
 
 **[Mac용 DMG 다운로드][dmg]** · [앱 소개][site] · [릴리스 정보][release] · [문제 제보][issues]
 
-Apple Silicon Mac · macOS 14 이상 권장 · v0.5.25 프리뷰
+Apple Silicon Mac · macOS 14 이상 권장 · v0.5.29 프리뷰
 
 ## 설치
 
@@ -37,7 +37,7 @@ Claude Desktop에서 별도로 시작한 하위 세션은 두 화면 모두에�
 
 ### Mac에서 Offtab이 열리지 않아요
 
-v0.5.25 프리뷰는 아직 Apple 공증을 받지 않았습니다. 앱을 여는 과정에서 macOS 경고가 나오면 [Apple의 안내][apple]에서 표시된 메시지를 확인하세요. 설치 파일은 [이 저장소의 Releases][releases]에서 받을 수 있습니다.
+v0.5.29 프리뷰는 아직 Apple 공증을 받지 않았습니다. 앱을 여는 과정에서 macOS 경고가 나오면 [Apple의 안내][apple]에서 표시된 메시지를 확인하세요. 설치 파일은 [이 저장소의 Releases][releases]에서 받을 수 있습니다.
 
 ### 입력이나 승인 대기가 바로 안 보여요
 
@@ -67,8 +67,8 @@ npm start
 - 이 Mac에서 사용할 앱은 `npm run package:mac:local`로 빌드합니다. `~/Library/Application Support/Offtab Release/local-signing-cert`에 저장된 인증서 지문으로 키체인의 Offtab 전용 인증서를 찾고, 같은 번들 ID와 인증서로 서명한 앱을 `release/local/`에 저장합니다. 임시 서명 버전에서 처음 전환할 때는 macOS 권한을 한 번 다시 허용해야 합니다.
 - 앱은 Tauri 2, Rust, React로 만들었습니다. 서비스 아이콘은 [Lobe Icons][lobe]에서 가져왔습니다. Codex와 Claude Code는 각 서비스의 제품명입니다.
 
-[dmg]: https://github.com/bygjun/Agent-Offtab/releases/download/v0.5.25/Offtab-0.5.25-arm64.dmg
-[release]: https://github.com/bygjun/Agent-Offtab/releases/tag/v0.5.25
+[dmg]: https://github.com/bygjun/Agent-Offtab/releases/download/v0.5.29/Offtab-0.5.29-arm64.dmg
+[release]: https://github.com/bygjun/Agent-Offtab/releases/tag/v0.5.29
 [releases]: https://github.com/bygjun/Agent-Offtab/releases
 [site]: https://bygjun.github.io/Agent-Offtab/
 [issues]: https://github.com/bygjun/Agent-Offtab/issues/new

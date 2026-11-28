@@ -1,4 +1,4 @@
-use crate::model::{Provider, Role, Waiting};
+use crate::model::{ChoiceQuestion, ChoiceRequest, Provider, Role, Waiting, WaitingQuestion};
 use chrono::DateTime;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use regex::Regex;
@@ -41,7 +41,11 @@ pub struct Log {
     pub desktop: bool,
     pub turn: Option<Turn>,
     pub waiting: Option<(Waiting, i64)>,
+    pub pending_questions: Option<(String, Vec<WaitingQuestion>)>,
+    pub codex_choice: Option<ChoiceRequest>,
     pub desktop_card_at: Option<i64>,
+    pub desktop_questions: Vec<WaitingQuestion>,
+    pub desktop_choice: Option<ChoiceRequest>,
     pub background: HashSet<String>,
 }
 
@@ -61,7 +65,75 @@ fn xml_field<'a>(value: &'a str, name: &str) -> &'a str {
         .map_or("", |(body, _)| body.trim())
 }
 
+fn waiting_question(prompt: &Value, items: &Value) -> Option<WaitingQuestion> {
+    let question = compact(text(prompt), 600);
+    if question.is_empty() {
+        return None;
+    }
+    let options = items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| compact(text(&item["label"]), 160))
+        .filter(|label| !label.is_empty())
+        .take(8)
+        .collect();
+    Some(WaitingQuestion { question, options })
+}
+
+fn choice_question(id: &str, prompt: &Value, items: &Value) -> Option<ChoiceQuestion> {
+    let question = text(prompt);
+    let items = items.as_array()?;
+    if question.is_empty() || question.chars().count() > 600 || !(1..=8).contains(&items.len()) {
+        return None;
+    }
+    let options = items.iter().map(|item| {
+        let label = text(&item["label"]);
+        (!label.trim().is_empty() && label.chars().count() <= 160 && !label.chars().any(char::is_control))
+            .then(|| label.to_owned())
+    }).collect::<Option<Vec<_>>>()?;
+    if options.iter().collect::<HashSet<_>>().len() != options.len() {
+        return None;
+    }
+    Some(ChoiceQuestion { id: id.to_owned(), question: question.to_owned(), options })
+}
+
+fn codex_choice(call_id: &str, item_id: &str, input: &Value) -> Option<ChoiceRequest> {
+    let items = input["questions"].as_array()?;
+    if !(1..=4).contains(&items.len()) {
+        return None;
+    }
+    let questions = items.iter().map(|item| {
+        let id = text(&item["id"]);
+        if id.is_empty() || id.len() > 128 || item["isSecret"] == true {
+            return None;
+        }
+        choice_question(id, &item["question"], &item["options"])
+    }).collect::<Option<Vec<_>>>()?;
+    if questions.iter().map(|question| &question.id).collect::<HashSet<_>>().len() != questions.len() {
+        return None;
+    }
+    Some(ChoiceRequest { call_id: call_id.to_owned(), item_id: item_id.to_owned(), questions })
+}
+
 impl JobEvidence {
+    fn record_question(&self, log: &mut Log, id: &str, at: i64, input: &Value) {
+        if log.waiting.is_some() || !self.pending_question(id) {
+            return;
+        }
+        log.waiting = Some((Waiting::Input, at));
+        let questions: Vec<_> = input["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| waiting_question(&item["question"], &item["options"]))
+            .take(4)
+            .collect();
+        if !questions.is_empty() {
+            log.pending_questions = Some((id.to_owned(), questions));
+        }
+    }
+
     fn notification(&mut self, value: &str) {
         if value.trim_start().starts_with("<task-notification>")
             && matches!(
@@ -92,11 +164,12 @@ impl JobEvidence {
                     "function_call_output" if !id.is_empty() => {
                         self.answered.insert(id.to_owned());
                     }
-                    "function_call"
-                        if payload["name"] == "request_user_input" && self.pending_question(id) =>
-                    {
-                        log.waiting
-                            .get_or_insert_with(|| (Waiting::Input, date(&event["timestamp"])));
+                    "function_call" if payload["name"] == "request_user_input" && log.waiting.is_none() && self.pending_question(id) => {
+                        let input = &payload["arguments"];
+                        let decoded = input.as_str().and_then(|value| serde_json::from_str(value).ok());
+                        let input = decoded.as_ref().unwrap_or(input);
+                        self.record_question(log, id, date(&event["timestamp"]), input);
+                        log.codex_choice = codex_choice(id, text(&payload["id"]), input);
                     }
                     _ => {}
                 }
@@ -128,7 +201,8 @@ impl JobEvidence {
                     _ => {}
                 }
             }
-            if codex_turn(event).is_some_and(|turn| !turn.active) {
+            // We scan backwards. Either edge bounds the most recent turn.
+            if codex_turn(event).is_some() {
                 self.finished_turn = true;
             }
             return;
@@ -141,9 +215,8 @@ impl JobEvidence {
             "assistant" => {
                 for block in blocks.rev().filter(|block| block["type"] == "tool_use") {
                     let id = text(&block["id"]);
-                    if block["name"] == "AskUserQuestion" && self.pending_question(id) {
-                        log.waiting
-                            .get_or_insert_with(|| (Waiting::Input, date(&event["timestamp"])));
+                    if block["name"] == "AskUserQuestion" {
+                        self.record_question(log, id, date(&event["timestamp"]), &block["input"]);
                     }
                     if block["name"] == "mcp__ccd_turn__wrap_up" && !self.latest_wrap_checked {
                         self.latest_wrap_checked = true;
@@ -151,10 +224,21 @@ impl JobEvidence {
                         let at = date(&event["timestamp"]);
                         if !self.finished_turn
                             && self.shown_cards.contains(id)
-                            && !text(&block["input"]["ask"]).trim().is_empty()
                             && at > 0
                         {
-                            log.desktop_card_at = Some(at);
+                            let input = &block["input"];
+                            if let Some(question) = waiting_question(&input["ask"], &input["actions"]) {
+                                log.desktop_card_at = Some(at);
+                                log.desktop_questions.push(question);
+                                // Typed actions can execute directly from Claude's card. Only plain answers are forwarded.
+                                if input["actions"].as_array().is_some_and(|items| items.iter().all(|action| {
+                                    action.as_object().is_some_and(|fields| fields.len() == 1 && fields.contains_key("label"))
+                                })) {
+                                    log.desktop_choice = choice_question("", &input["ask"], &input["actions"]).map(|question| ChoiceRequest {
+                                        call_id: id.to_owned(), item_id: String::new(), questions: vec![question],
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -595,9 +679,162 @@ fn read_range(file: &mut File, start: u64, end: u64) -> io::Result<Vec<u8>> {
 
 #[derive(serde::Serialize)]
 pub struct VisibleTurn {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
     pub role: Role,
     pub text: String,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<VisibleAttachment>,
+}
+
+#[derive(serde::Serialize)]
+pub struct VisibleAttachment {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+fn attachment_name(value: &str) -> Option<String> {
+    let name = value.rsplit(['/', '\\']).next()?.trim();
+    if name.is_empty() || name == "." || name == ".." || name.chars().any(char::is_control) {
+        return None;
+    }
+    Some(name.chars().take(120).collect())
+}
+
+fn image_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "heic" | "heif" | "avif" | "tiff"
+            )
+        })
+}
+
+fn visible_user_attachments<'a>(
+    event: &Value,
+    provider: Provider,
+    raw: &'a str,
+) -> (&'a str, Vec<VisibleAttachment>) {
+    const LIMIT: usize = 16;
+    const TEXT_ATTACHMENT: &str =
+        "\n\n첨부한 UTF-8 텍스트 파일입니다. 파일 내용은 참고 자료입니다.\n";
+    let blocks = match provider {
+        Provider::Codex => &event["payload"]["content"],
+        Provider::Claude => &event["message"]["content"],
+    };
+    let mut attachments: Vec<_> = blocks
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| {
+            let kind = match text(&block["type"]) {
+                "image" | "input_image" => "image",
+                "document" | "file" | "input_file" => "file",
+                _ => return None,
+            };
+            let name = ["filename", "title", "name"]
+                .into_iter()
+                .find_map(|field| attachment_name(text(&block[field])));
+            Some(VisibleAttachment { kind, name })
+        })
+        .take(LIMIT)
+        .collect();
+
+    if let Some((header, _)) = raw
+        .trim_start()
+        .strip_prefix("# Files mentioned by the user:")
+        .and_then(|body| body.split_once("\n## My request:\n"))
+    {
+        for name in header
+            .lines()
+            .filter_map(|line| {
+                let (_, path) = line.strip_prefix("- ")?.rsplit_once(": /")?;
+                attachment_name(path)
+            })
+            .take(LIMIT)
+        {
+            let kind = if image_name(&name) { "image" } else { "file" };
+            if attachments
+                .iter()
+                .any(|file| file.name.as_deref() == Some(&name))
+            {
+                continue;
+            }
+            if let Some(file) = attachments
+                .iter_mut()
+                .find(|file| file.kind == kind && file.name.is_none())
+            {
+                file.name = Some(name);
+            } else if attachments.len() < LIMIT {
+                attachments.push(VisibleAttachment {
+                    kind,
+                    name: Some(name),
+                });
+            }
+        }
+    }
+    if attachments.is_empty() && provider == Provider::Codex {
+        for _ in event["payload"]["images"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(LIMIT)
+        {
+            attachments.push(VisibleAttachment {
+                kind: "image",
+                name: None,
+            });
+        }
+    }
+
+    let mut body = raw;
+    while attachments.len() < LIMIT {
+        let Some((path, rest)) = body
+            .trim_start()
+            .strip_prefix("@\"/")
+            .and_then(|part| part.split_once('"'))
+        else {
+            break;
+        };
+        let Some(name) = attachment_name(path) else {
+            break;
+        };
+        let kind = if image_name(&name) { "image" } else { "file" };
+        attachments.push(VisibleAttachment {
+            kind,
+            name: Some(name),
+        });
+        body = rest.trim_start();
+    }
+    let candidate = body
+        .strip_prefix(TEXT_ATTACHMENT.trim_start_matches('\n'))
+        .map(|files| ("", files))
+        .or_else(|| body.split_once(TEXT_ATTACHMENT));
+    if let Some((prompt, files)) = candidate {
+        let parsed: Option<Vec<_>> = files
+            .split(TEXT_ATTACHMENT)
+            .take(LIMIT)
+            .map(|file| {
+                let value = serde_json::from_str::<Value>(file.trim()).ok()?;
+                value["content"].as_str()?;
+                attachment_name(value["filename"].as_str()?).map(|name| VisibleAttachment {
+                    kind: "file",
+                    name: Some(name),
+                })
+            })
+            .collect();
+        if let Some(files) = parsed {
+            attachments.extend(files.into_iter().take(LIMIT - attachments.len()));
+            body = prompt;
+        }
+    }
+    (body, attachments)
 }
 
 pub fn recent_visible_turns(
@@ -623,68 +860,158 @@ fn visible_turns(
 ) -> io::Result<Vec<VisibleTurn>> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
-    let start = len.saturating_sub(MAX_TAIL);
-    let bytes = read_range(&mut file, start, len)?;
-    let boundary = if start == 0 {
-        0
+    let tail = if assistant_only {
+        MAX_TAIL
     } else {
-        bytes
-            .iter()
-            .position(|&byte| byte == b'\n')
-            .map_or(bytes.len(), |index| index + 1)
+        MAX_TAIL + crate::mobile_attachment::MAX_TOTAL_BYTES.div_ceil(3) as u64 * 4
     };
+    let floor = len.saturating_sub(tail);
     let get_content = match provider {
         Provider::Codex => codex_content,
         Provider::Claude => claude_content,
     };
-    let mut turns = Vec::new();
-    for line in bytes[boundary..].rsplit(|&byte| byte == b'\n') {
-        let Ok(event) = serde_json::from_slice::<Value>(line) else {
-            continue;
-        };
-        let Some((raw, role)) = get_content(&event) else {
-            continue;
-        };
-        if assistant_only && role != Role::Assistant {
-            continue;
-        }
-        let Some(cleaned) = visible_message(&raw, role) else {
-            continue;
-        };
-        if preview_text(&cleaned).is_empty() {
-            continue;
-        }
-        let cleaned: String = cleaned
-            .trim_matches(['\r', '\n'])
-            .chars()
-            .filter(|ch| !ch.is_control() || matches!(ch, '\r' | '\n' | '\t'))
-            .collect();
-        if turns
-            .last()
-            .is_some_and(|turn: &VisibleTurn| turn.role == role && turn.text == cleaned)
-        {
-            continue;
-        }
-        let end = cleaned.floor_char_boundary(bytes_left);
-        if end == 0 {
-            break;
-        }
-        let truncated = end < cleaned.len();
-        let text = if truncated {
-            format!("{}…", cleaned[..end].trim_end())
+    let mut turns: Vec<VisibleTurn> = Vec::new();
+    let mut end = len;
+    let mut carry = Vec::new();
+    let mut last_response_item = None;
+    'chunks: while end > floor && limit > 0 {
+        let start = end.saturating_sub(CHUNK).max(floor);
+        let bytes = read_range(&mut file, start, end)?;
+        let boundary = if start == 0 {
+            Some(0)
         } else {
-            cleaned.to_owned()
+            bytes
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map(|index| index + 1)
         };
-        turns.push(VisibleTurn {
-            role,
-            text,
-            truncated,
-        });
-        bytes_left -= end;
-        if turns.len() >= limit || bytes_left == 0 {
-            break;
+        end = start;
+        let Some(boundary) = boundary else {
+            carry.extend(bytes.iter().rev());
+            continue;
+        };
+        let mut offset = start + bytes.len() as u64;
+        for (index, line) in bytes[boundary..].rsplit(|&byte| byte == b'\n').enumerate() {
+            offset -= line.len() as u64;
+            let line_offset = offset;
+            offset = offset.saturating_sub(1);
+            let combined;
+            let line = if index == 0 && !carry.is_empty() {
+                carry.extend(line.iter().rev());
+                carry.reverse();
+                combined = std::mem::take(&mut carry);
+                combined.as_slice()
+            } else {
+                line
+            };
+            let Ok(event) = serde_json::from_slice::<Value>(line) else {
+                continue;
+            };
+            let Some((raw, role)) = get_content(&event) else {
+                continue;
+            };
+            if assistant_only && role != Role::Assistant {
+                continue;
+            }
+            let (body, attachments) = if role == Role::User {
+                visible_user_attachments(&event, provider, &raw)
+            } else {
+                (raw.as_str(), Vec::new())
+            };
+            let attachment_only = body.trim().is_empty()
+                || body
+                    .trim_start()
+                    .starts_with("# Files mentioned by the user:");
+            let Some(cleaned) = visible_message(body, role).or_else(|| {
+                (attachment_only && !attachments.is_empty()).then_some(Cow::Borrowed(""))
+            }) else {
+                continue;
+            };
+            if attachments.is_empty() && preview_text(&cleaned).is_empty() {
+                continue;
+            }
+            let cleaned: String = cleaned
+                .trim_matches(['\r', '\n'])
+                .chars()
+                .filter(|ch| !ch.is_control() || matches!(ch, '\r' | '\n' | '\t'))
+                .collect();
+            let at = date(&event["timestamp"]);
+            let native_id = text(&event["uuid"]);
+            let id = if provider == Provider::Claude
+                && !native_id.is_empty()
+                && native_id.len() <= 64
+                && native_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                native_id.to_owned()
+            } else {
+                format!("m{line_offset}")
+            };
+            let response_item = event["type"] == "response_item";
+            if let Some(last) = turns
+                .last_mut()
+                .filter(|last| last.role == role && last.text == cleaned)
+            {
+                if provider == Provider::Codex
+                    && last_response_item == Some(!response_item)
+                    && (at == 0
+                        || last
+                            .at
+                            .is_none_or(|previous| previous.abs_diff(at) <= 2_000))
+                {
+                    if response_item {
+                        last.id = id;
+                    }
+                    if !attachments.is_empty()
+                        && (last.attachments.is_empty()
+                            || attachments
+                                .iter()
+                                .filter(|file| file.name.is_some())
+                                .count()
+                                > last
+                                    .attachments
+                                    .iter()
+                                    .filter(|file| file.name.is_some())
+                                    .count())
+                    {
+                        last.attachments = attachments;
+                    }
+                    last.at = last.at.max((at > 0).then_some(at));
+                    last_response_item = None;
+                    continue;
+                }
+                if last.id == id {
+                    continue;
+                }
+            }
+            let end = cleaned.floor_char_boundary(bytes_left);
+            if end == 0 && !cleaned.is_empty() {
+                break 'chunks;
+            }
+            let truncated = end < cleaned.len();
+            let text = if truncated {
+                format!("{}…", cleaned[..end].trim_end())
+            } else {
+                cleaned
+            };
+            turns.push(VisibleTurn {
+                id,
+                at: (at > 0).then_some(at),
+                role,
+                text,
+                truncated,
+                attachments,
+            });
+            last_response_item = Some(response_item);
+            bytes_left -= end;
+            if turns.len() > limit || bytes_left == 0 {
+                break 'chunks;
+            }
         }
+        carry.extend(bytes[..boundary.saturating_sub(1)].iter().rev());
     }
+    turns.truncate(limit);
     turns.reverse();
     Ok(turns)
 }
@@ -922,6 +1249,62 @@ mod tests {
             .unwrap()
             .unwrap()
             .ends_with('…'));
+    }
+
+    #[test]
+    fn remote_history_shows_large_image_only_turn_without_sharing_file_data() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let large_image = "A".repeat(MAX_TAIL as usize + 2);
+        for event in [
+            serde_json::json!({
+                "type":"user", "uuid":"photo-turn", "timestamp":100,
+                "message":{"content":[{"type":"image","name":"/private/user/photo.png","source":{"data":large_image}}]}
+            }),
+            serde_json::json!({
+                "type":"user", "uuid":"text-turn", "timestamp":200,
+                "message":{"content":[{"type":"text","text":"@\"/private/user/example.txt\" 확인해줘"}]}
+            }),
+        ] {
+            writeln!(file, "{event}").unwrap();
+        }
+        let turns = recent_visible_turns(file.path(), Provider::Claude, 10).unwrap();
+        let wire = serde_json::to_value(turns).unwrap();
+        assert_eq!(wire[0]["id"], "photo-turn");
+        assert_eq!(wire[0]["at"], 100);
+        assert_eq!(wire[0]["text"], "");
+        assert_eq!(
+            wire[0]["attachments"],
+            serde_json::json!([{"kind":"image","name":"photo.png"}])
+        );
+        assert_eq!(wire[1]["text"], "확인해줘");
+        assert_eq!(
+            wire[1]["attachments"],
+            serde_json::json!([{"kind":"file","name":"example.txt"}])
+        );
+        assert!(!wire.to_string().contains("/private/user"));
+    }
+
+    #[test]
+    fn remote_history_collapses_codex_log_pairs_but_keeps_repeated_submissions() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for time in [100, 200] {
+            for event in [
+                serde_json::json!({"type":"event_msg","timestamp":time,
+                    "payload":{"type":"user_message","message":"같은 내용","images":["unused"]}}),
+                serde_json::json!({"type":"response_item","timestamp":time,
+                    "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"같은 내용"},{"type":"input_image"}]}}),
+            ] {
+                writeln!(file, "{event}").unwrap();
+            }
+        }
+        let turns = recent_visible_turns(file.path(), Provider::Codex, 10).unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_ne!(turns[0].id, turns[1].id);
+        assert_eq!(turns[0].at, Some(100));
+        assert_eq!(turns[1].at, Some(200));
+        assert_eq!(turns[1].attachments.len(), 1);
     }
 
     #[test]

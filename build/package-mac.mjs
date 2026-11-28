@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const signingDirectory = join(homedir(), 'Library', 'Application Support', 'Offtab Release');
@@ -51,11 +51,30 @@ function packageMac(args) {
     PATH: toolsPath,
     APPLE_SIGNING_IDENTITY: candidates[0][1],
   };
+  delete env.OFFTAB_PAIRING_SIGNER;
   buildApp(['--bundles', 'app,dmg'], args, env);
 
   const requirement = `identifier "${identifier}" and anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${team}"`;
   execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', `-R=${requirement}`, app], { stdio: 'inherit' });
   console.log(`Verified Offtab's Developer ID signature for team ${team}.`);
+}
+
+function bundlePairingHelper(fingerprint) {
+  const resources = join(app, 'Contents', 'Resources');
+  const helper = join(resources, 'OfftabPairingKeychain');
+  const helperId = `${identifier}.pairing-keychain`;
+  const directory = mkdtempSync(join(tmpdir(), 'offtab-pairing-build-'));
+  const signer = join(directory, 'Signer.swift');
+  try {
+    mkdirSync(resources, { recursive: true });
+    writeFileSync(signer, `let offtabSigner = "${fingerprint}"\n`);
+    execFileSync('/usr/bin/xcrun', ['swiftc', '-O', '-target', 'arm64-apple-macos11.0', 'build/pairing-keychain.swift', signer, '-o', helper], { stdio: 'inherit' });
+    const requirement = `identifier "${helperId}" and certificate leaf = H"${fingerprint}"`;
+    execFileSync('/usr/bin/codesign', ['--force', '--sign', fingerprint, '--identifier', helperId, '--timestamp=none', '--options', 'runtime', `-r=designated => ${requirement}`, helper], { stdio: 'inherit' });
+    execFileSync('/usr/bin/codesign', ['--verify', '--strict', `-R=${requirement}`, helper], { stdio: 'inherit' });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 function packageLocal(args) {
@@ -73,7 +92,7 @@ function packageLocal(args) {
     throw new Error('The configured Offtab local signing identity is unavailable in Keychain.');
   }
 
-  buildApp(['--bundles', 'app', '--no-sign'], args, { ...process.env, PATH: toolsPath });
+  buildApp(['--bundles', 'app', '--no-sign'], args, { ...process.env, PATH: toolsPath, OFFTAB_PAIRING_SIGNER: fingerprint });
   const version = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print CFBundleShortVersionString', join(app, 'Contents', 'Info.plist')], { encoding: 'utf8' }).trim();
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Set an explicit local build version such as 0.5.9.');
   const local = 'release/local';
@@ -82,6 +101,7 @@ function packageLocal(args) {
   const destination = join(output, 'Offtab.app');
   const requirement = `identifier "${identifier}" and certificate leaf = H"${fingerprint}"`;
   try {
+    bundlePairingHelper(fingerprint);
     execFileSync('/usr/bin/codesign', ['--force', '--sign', fingerprint, '--timestamp=none', '--options', 'runtime', `-r=designated => ${requirement}`, app], { stdio: 'inherit' });
     execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', `-R=${requirement}`, app], { stdio: 'inherit' });
     renameSync(app, destination);

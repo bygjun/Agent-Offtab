@@ -14,6 +14,8 @@ export interface Session {
   active?: boolean;
   waiting?: Waiting;
   waitingAt?: number;
+  waitingDetails?: { questions?: { question: string; options: string[] }[]; tool?: string };
+  choiceToken?: string;
   background?: number;
   recentlyActive?: boolean;
   activityAt?: number;
@@ -55,6 +57,7 @@ export interface MobileConnection {
 
 export interface DeskApi {
   list(scope: ListScope): Promise<Snapshot>;
+  publishCompact?(view: CompactView): Promise<void>;
   open(provider: Provider, id: string): Promise<OpenResult>;
   syncReads?(updates: ReadUpdate[]): Promise<void>;
   pin(value?: boolean): Promise<boolean>;
@@ -66,6 +69,16 @@ export interface DeskApi {
     openClaudeAccess?(): Promise<void>;
   };
   notifications?: { permission(): Promise<boolean>; send(title: string, body: string): void };
+}
+
+export interface CompactPosition {
+  workAt: number;
+  readAt?: number;
+}
+
+export interface CompactView {
+  entries: (CompactPosition & { session: Session })[];
+  parents: Session[];
 }
 
 export const deskWindow = { width: 1040, height: 740, minWidth: 360, minHeight: 360 };

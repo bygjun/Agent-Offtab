@@ -214,11 +214,19 @@ export type ReplyTarget = { id: string; updatedAt: number; title: string };
 export type ReplyCode = 'processing' | 'queued' | 'sent' | 'blocked' | 'invalid-attachment' | 'busy' | 'unavailable' | 'unknown'
   | 'desktop-permission' | 'desktop-locked' | 'desktop-draft' | 'desktop-target';
 export type Receipt = { id: string; code: ReplyCode };
-export type ConversationTurn = { role: 'assistant' | 'user'; text: string; truncated: boolean };
+export type ConversationAttachment = { kind: 'image' | 'file'; name?: string };
+export type ConversationTurn = {
+  role: 'assistant' | 'user'; text: string; truncated: boolean;
+  id?: string; at?: number; attachments?: ConversationAttachment[];
+};
 export type ReplyContext = { id: string; answer: string | null; turns?: ConversationTurn[]; failed: boolean };
 
 export function queueReply(device: Device, id: string, target: ReplyTarget, text: string, permit: string, attachments: ReplyAttachment[], sentAt: number, onUpload?: (percent: number) => void) {
   return sendReplyRequest(device, id, { target: target.id, text, permit, updatedAt: target.updatedAt, attachments, sentAt }, attachments.length ? onUpload : undefined);
+}
+
+export function queueChoice(device: Device, id: string, target: ReplyTarget, permit: string, token: string, answers: number[]) {
+  return sendReplyRequest(device, id, { target: target.id, permit, updatedAt: target.updatedAt, choice: { token, answers } });
 }
 
 export function requestReplyContext(device: Device, id: string, target: string, historyLimit: number, permit?: string | null) {

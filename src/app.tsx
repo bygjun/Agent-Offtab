@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, ChevronDown, Command, Layers2, Maximize2, Minimize2, Pin, PinOff, RefreshCw, Search, Settings, ShieldCheck, X } from 'lucide-react';
 import { day, type DeskApi, type ListScope, type Provider, type Session, type Snapshot, type Source, type WindowMode } from './types';
 import { CompactList, SessionChildren, SessionRowActions, SessionStatus, SessionTitle } from './compact-list';
+import { compactView } from './compact-state';
 import { sessionTree, type SessionTree } from './session-tree';
 import { hideSession, isWorking, markRead, readUpdates, restoreTracked, saveTracked, sessionKey, trackSessions, type TrackedSessions } from './tracked-state';
 import { DeskSettings } from './desk-settings';
@@ -106,6 +107,7 @@ export function App({ desk, clock = Date.now, persist = false }: { desk: DeskApi
   const alerted = useRef(new Map<string, string>());
   const alertsReady = useRef(false);
   const scope = useRef<ListScope>({ mode: 'compact', watched: [] });
+  const publishedCompact = useRef('');
 
   const refresh = useCallback(async () => {
     if (inFlight.current) return;
@@ -292,6 +294,17 @@ export function App({ desk, clock = Date.now, persist = false }: { desk: DeskApi
   const periodSessions = useMemo(() => availableSessions.filter(item => !item.contextOnly
     && (item.waiting || isWorking(item) || item.updatedAt >= now - days * day)), [availableSessions, now, days]);
   const parentSessions = useMemo(() => availableSessions.filter(item => item.provider === 'claude' && item.nativeId), [availableSessions]);
+  useEffect(() => {
+    if (!desk.publishCompact || !snapshot) return;
+    const view = compactView(tracked, parentSessions);
+    const revision = JSON.stringify(view);
+    if (revision === publishedCompact.current) return;
+    publishedCompact.current = revision;
+    void desk.publishCompact(view).catch(() => {
+      if (publishedCompact.current === revision) publishedCompact.current = '';
+    });
+  }, [desk, snapshot, tracked, parentSessions]);
+
   function hide(item: Session) {
     const hiddenAt = clock();
     setTracked(previous => hideSession(previous, item, hiddenAt));

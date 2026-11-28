@@ -17,7 +17,7 @@ pub enum Mode {
     Full,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
@@ -31,7 +31,37 @@ pub enum Waiting {
     Approval,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WaitingQuestion {
+    pub question: String,
+    pub options: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WaitingDetails {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<WaitingQuestion>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip)]
+    pub choice: Option<ChoiceRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChoiceQuestion {
+    pub id: String,
+    pub question: String,
+    pub options: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChoiceRequest {
+    pub call_id: String,
+    pub item_id: String,
+    pub questions: Vec<ChoiceQuestion>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub id: String,
@@ -48,8 +78,11 @@ pub struct Session {
     pub waiting: Option<Waiting>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_details: Option<WaitingDetails>,
+    #[serde(default)]
     pub background: usize,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recently_active: bool,
     pub activity_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,9 +91,9 @@ pub struct Session {
     pub native_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_native_id: Option<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub context_only: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_transcript: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read: Option<crate::session_reads::ReadStatus>,
@@ -119,6 +152,36 @@ pub struct Watched {
 pub struct ListScope {
     pub mode: Mode,
     pub watched: Vec<Watched>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactPosition {
+    pub work_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompactEntry {
+    pub session: Session,
+    #[serde(flatten)]
+    pub position: CompactPosition,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompactView {
+    pub entries: Vec<CompactEntry>,
+    pub parents: Vec<Session>,
+}
+
+impl CompactView {
+    pub fn rows(&self) -> impl Iterator<Item = (&Session, Option<CompactPosition>)> {
+        self.entries
+            .iter()
+            .map(|row| (&row.session, Some(row.position)))
+            .chain(self.parents.iter().map(|session| (session, None)))
+    }
 }
 
 #[derive(Debug, Serialize)]

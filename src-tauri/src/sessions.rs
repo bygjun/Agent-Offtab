@@ -3,7 +3,7 @@ use crate::{
     hooks::{self, Signal},
     model::{
         is_uuid, ListScope, Mode, Provider, Role, Session, SessionId, Snapshot, Source,
-        SourceStatus, Waiting, Watched, WEEK_MS,
+        SourceStatus, Waiting, WaitingDetails, WaitingQuestion, Watched, WEEK_MS,
     },
     targets::{TerminalEvidence, TerminalTab},
     transcript::{
@@ -54,6 +54,7 @@ struct DesktopInfo {
     at: i64,
     archived: bool,
     waiting_at: Option<i64>,
+    waiting_question: String,
     latest_user_frame: i64,
     turn_end: i64,
     has_mounted_wrap_up: bool,
@@ -454,6 +455,9 @@ impl Collector {
             } else {
                 None
             };
+            let waiting_details = waiting.and_then(|(kind, at)| {
+                waiting_details(kind, at, observed, log.as_ref())
+            });
             let background = parents
                 .get(&row.id)
                 .into_iter()
@@ -526,6 +530,7 @@ impl Collector {
                 active,
                 waiting: waiting.map(|(waiting, _)| waiting),
                 waiting_at: waiting.map(|(_, at)| at),
+                waiting_details,
                 background,
                 recently_active,
                 activity_at: message_at
@@ -563,7 +568,7 @@ impl Collector {
         // Desktop can end the CLI turn while its wrap-up card still waits for a choice.
         let turn_end = date(&data["lastTurnEdgeAt"]);
         let user_frame = date(&data["latestUserFrameAt"]);
-        let has_answer_card = !text(&data["turnWrapUp"]["needsUser"]).trim().is_empty();
+        let waiting_question = compact(text(&data["turnWrapUp"]["needsUser"]), 600);
         let spawned_from = &data["spawnedFrom"];
         let parent_native_id = text(&spawned_from["sessionId"]);
         let info = DesktopInfo {
@@ -577,8 +582,9 @@ impl Collector {
             title: text(&data["title"]).to_owned(),
             at: date(&data["lastActivityAt"]).max(date(&data["createdAt"])),
             archived: data["isArchived"].as_bool().unwrap_or(false),
-            waiting_at: (has_answer_card && turn_end > 0 && turn_end > user_frame)
+            waiting_at: (!waiting_question.is_empty() && turn_end > 0 && turn_end > user_frame)
                 .then_some(turn_end),
+            waiting_question,
             latest_user_frame: user_frame,
             turn_end,
             has_mounted_wrap_up: data["turnBoxMounted"] == true && data["turnWrapUp"].is_object(),
@@ -829,6 +835,11 @@ impl Collector {
                 if let Some(at) = card_at {
                     session.waiting = Some(Waiting::Input);
                     session.waiting_at = Some(at);
+                    session.waiting_details = Some(WaitingDetails {
+                        questions: log.desktop_questions.clone(),
+                        tool: None,
+                        choice: log.desktop_choice.clone(),
+                    });
                 }
                 decorate_claude(&mut session, run, Some(&log), scope);
                 sessions.insert(id.to_owned(), session);
@@ -1005,6 +1016,27 @@ impl Collector {
     }
 }
 
+fn waiting_details(
+    kind: Waiting,
+    at: i64,
+    signal: Option<&Signal>,
+    log: Option<&crate::transcript::Log>,
+) -> Option<WaitingDetails> {
+    let signal = signal.filter(|signal| signal.waiting == Some(kind) && signal.waiting_at == at);
+    match kind {
+        Waiting::Input => {
+            let log = log?;
+            let (id, questions) = log.pending_questions.as_ref()?;
+            (log.waiting == Some((kind, at)) || signal.is_some_and(|signal| &signal.tool_id == id))
+                .then(|| WaitingDetails { questions: questions.clone(), tool: None, choice: log.codex_choice.clone() })
+        }
+        Waiting::Approval => {
+            let tool = compact(&signal?.tool, 100);
+            (!tool.is_empty()).then(|| WaitingDetails { questions: Vec::new(), tool: Some(tool), choice: None })
+        }
+    }
+}
+
 fn decorate_claude(
     session: &mut Session,
     run: Option<&ClaudeRun>,
@@ -1049,6 +1081,12 @@ fn decorate_claude(
     if let Some((kind, at)) =
         waiting.filter(|(_, at)| session.waiting_at.is_none_or(|saved| *at >= saved))
     {
+        if session.waiting != Some(kind) || session.waiting_at != Some(at) {
+            session.waiting_details = None;
+        }
+        if let Some(details) = waiting_details(kind, at, signal, log) {
+            session.waiting_details = Some(details);
+        }
         session.waiting = Some(kind);
         session.waiting_at = Some(at);
     }
@@ -1100,6 +1138,11 @@ fn claude_session(
         active: processes_read.then(|| run.is_some_and(|run| run.active)),
         waiting: waiting_at.map(|_| Waiting::Input),
         waiting_at,
+        waiting_details: desktop.filter(|_| waiting_at.is_some()).map(|info| WaitingDetails {
+            questions: vec![WaitingQuestion { question: info.waiting_question.clone(), options: Vec::new() }],
+            tool: None,
+            choice: None,
+        }),
         background: 0,
         recently_active: false,
         activity_at: work_at.max(latest.as_ref().map_or(0, |message| message.at)),

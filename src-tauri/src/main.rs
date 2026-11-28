@@ -4,12 +4,15 @@ mod claude_desktop;
 #[cfg(target_os = "macos")]
 mod claude_pasteboard;
 mod codex_photo;
+mod codex_choice;
 mod hooks;
 mod mobile;
 mod mobile_attachment;
 mod mobile_devices;
 mod mobile_reply;
 mod model;
+#[cfg(target_os = "macos")]
+mod pairing_keychain;
 mod session_reads;
 mod sessions;
 mod targets;
@@ -47,12 +50,23 @@ struct DeskState {
 
 struct MobileState {
     connections: Mutex<mobile::Mobile>,
+    compact: mobile::DesktopCompact,
     relay: Mutex<RelayPreferences>,
     relay_path: PathBuf,
     dispatcher: mobile_reply::Dispatcher,
 }
 
 const MOBILE_DISABLED: &str = "휴대폰 연결을 사용하려면 Mac에서 중계 주소를 설정해 주세요.";
+
+#[tauri::command]
+fn publish_compact(view: model::CompactView, state: State<'_, DeskState>) -> Result<(), String> {
+    let mobile = state.mobile.as_ref().ok_or(MOBILE_DISABLED)?;
+    *mobile
+        .compact
+        .lock()
+        .map_err(|_| "작은 창의 목록을 동기화하지 못했습니다.")? = Some(Arc::new(view));
+    Ok(())
+}
 
 #[tauri::command]
 async fn list_sessions(scope: ListScope, state: State<'_, DeskState>) -> Result<Snapshot, String> {
@@ -293,7 +307,7 @@ async fn mobile_connection(
                 || updated.local_url != preferences.local_url
                 || connections.startup_error().is_some()
             {
-                let mut restored = mobile::Mobile::with_reads(reads);
+                let mut restored = mobile::Mobile::with_compact(reads, mobile.compact.clone());
                 restored.restore(
                     &updated.url,
                     updated.local_url.as_deref(),
@@ -466,8 +480,13 @@ fn main() {
                 None
             });
             let mobile = preferences.map(|preferences| {
+                let compact = mobile::DesktopCompact::default();
                 let mobile = Arc::new(MobileState {
-                    connections: Mutex::new(mobile::Mobile::with_reads(reads.clone())),
+                    connections: Mutex::new(mobile::Mobile::with_compact(
+                        reads.clone(),
+                        compact.clone(),
+                    )),
+                    compact,
                     relay: Mutex::new(preferences.clone()),
                     relay_path,
                     dispatcher: mobile_reply::Dispatcher::new(&home),
@@ -517,6 +536,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
+            publish_compact,
             mark_sessions_read,
             open_session,
             session_hooks,

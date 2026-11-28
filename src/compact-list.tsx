@@ -5,14 +5,8 @@ import { isWorking, sessionKey, type Entry, type TrackedSessions } from './track
 import { TypedPreview } from './typed-preview';
 import { hasPendingSessions, sessionTree, type SessionTree } from './session-tree';
 import type { Session } from './types';
+import { compactEntries } from './compact-state';
 import './compact-list.css';
-
-function priority(entry: Entry) {
-  if (entry.session.waiting === 'approval') return 4;
-  if (entry.session.waiting === 'input') return 3;
-  if (isWorking(entry.session)) return 2;
-  return entry.readAt === undefined ? 1 : 0;
-}
 
 export function SessionStatus({ session, unread }: { session: Session; unread?: boolean }) {
   const { waiting, active, background = 0 } = session;
@@ -20,7 +14,7 @@ export function SessionStatus({ session, unread }: { session: Session; unread?: 
   const label = waiting === 'approval' ? '승인 대기' : waiting === 'input' ? '입력 대기'
     : active ? '작업 중' : background ? `백그라운드 ${background}개` : active === false ? '완료' : '확인 중';
   return (
-    <span className="compact-status" data-state={state}>
+    <span className="compact-status" data-state={state} data-background={background > 0 || undefined}>
       {(state === 'waiting' || state === 'running' || unread) && <span className="status-dot" aria-hidden="true" />}
       <span>{label}</span>
       {background > 0 && (active || waiting) && <span className="background-count" aria-label={`백그라운드 ${background}개`} title={`백그라운드 ${background}개`}>+{background}</span>}
@@ -40,12 +34,14 @@ export function SessionRowActions({ children, descendants, className, onRead, on
   descendants?: ReactNode;
   className?: string;
   onRead?: () => void;
-  onHide(): void;
+  onHide?: () => void;
   showMenuButton?: boolean;
   rowAction?: ReactNode;
 }) {
   const [menu, setMenu] = useState(false);
   const row = useRef<HTMLLIElement>(null);
+  const hasActions = Boolean(onRead || onHide || rowAction);
+  const hasButton = showMenuButton && hasActions;
 
   useEffect(() => {
     if (!menu) return;
@@ -57,13 +53,13 @@ export function SessionRowActions({ children, descendants, className, onRead, on
   }, [menu]);
 
   return (
-    <li ref={row} className={showMenuButton ? `compact-has-menu ${className ?? ""}` : className}
+    <li ref={row} className={hasButton ? `compact-has-menu ${className ?? ""}` : className}
       onBlur={event => {
         // WebKit can blur a button before delivering its pointer click.
         if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) setMenu(false);
       }}
       onContextMenu={event => {
-        if (!(event.target instanceof Element) || event.target.closest('li') !== event.currentTarget) return;
+        if (!hasActions || !(event.target instanceof Element) || event.target.closest('li') !== event.currentTarget) return;
         event.preventDefault();
         setMenu(true);
       }}
@@ -71,7 +67,7 @@ export function SessionRowActions({ children, descendants, className, onRead, on
         if (event.currentTarget.firstElementChild?.contains(event.target as Node)) setMenu(false);
       }}
       onKeyDown={event => {
-        if (!(event.target instanceof Element) || event.target.closest('li') !== event.currentTarget) return;
+        if (!hasActions || !(event.target instanceof Element) || event.target.closest('li') !== event.currentTarget) return;
         if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
           event.preventDefault();
           setMenu(true);
@@ -82,16 +78,16 @@ export function SessionRowActions({ children, descendants, className, onRead, on
         }
       }}>
       {children}
-      {showMenuButton && <button type="button" className="compact-menu-button" aria-label="세션 동작"
+      {hasButton && <button type="button" className="compact-menu-button" aria-label="세션 동작"
         aria-expanded={menu} onClick={() => setMenu(open => !open)}><Ellipsis aria-hidden="true" /></button>}
-      {menu && <div className="row-actions" aria-label="세션 동작" role="group">
+      {menu && hasActions && <div className="row-actions" aria-label="세션 동작" role="group">
         {rowAction}
         {onRead && <button type="button" onClick={event => {
           event.currentTarget.closest('li')?.querySelector('button')?.focus({ preventScroll: true });
           onRead();
           setMenu(false);
         }}>읽음으로 표시</button>}
-        <button type="button" autoFocus onClick={onHide}>목록에서 제외</button>
+        {onHide && <button type="button" autoFocus onClick={onHide}>목록에서 제외</button>}
       </div>}
       {descendants}
     </li>
@@ -127,7 +123,7 @@ export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening
   parents: Session[];
   onOpen(session: Session): void;
   onRead(session: Session): void;
-  onHide(session: Session): void;
+  onHide?: (session: Session) => void;
   opening?: string;
   notice?: string;
   loading: boolean;
@@ -135,8 +131,7 @@ export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening
   rowTitle?: (session: Session) => string;
   rowAction?: (session: Session) => ReactNode;
 }) {
-  const rows = [...sessions.values()].filter(entry => !entry.restoring && entry.hiddenAt === undefined)
-    .sort((a, b) => priority(b) - priority(a) || b.workAt - a.workAt);
+  const rows = compactEntries(sessions);
   const tree = sessionTree<Pick<Entry, 'session' | 'readAt'>>(rows, parents.map(session => ({ session })));
 
   function renderRow(
@@ -147,7 +142,7 @@ export function CompactList({ sessions, parents, onOpen, onRead, onHide, opening
     const folder = session.cwd === parent?.cwd ? undefined : session.cwd.split('/').filter(Boolean).at(-1);
     const canRead = !context && !session.waiting && !isWorking(session) && session.active === false && readAt === undefined;
     return (
-      <SessionRowActions key={key} onRead={canRead ? () => onRead(session) : undefined} onHide={() => onHide(session)}
+      <SessionRowActions key={key} onRead={canRead ? () => onRead(session) : undefined} onHide={onHide && (() => onHide(session))}
         showMenuButton={showMenuButton} rowAction={context ? undefined : rowAction?.(session)}
         descendants={children.length > 0 && <SessionChildren nodes={children}
           render={child => renderRow(child, session)} />}>
